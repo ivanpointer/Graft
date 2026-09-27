@@ -87,6 +87,9 @@ export function writeStats(d: string, s: Stats): void { writeJsonAtomic(statsPat
  * Missing fields always retain backwards-compatible defaults.
  */
 export interface BuildConfig {
+  /** Optional deep-build hook module. Repo-local paths require an explicit
+   * `--hook` on every run; only absolute paths outside the repo auto-load. */
+  hooks?: string;
   /** SKIP_DIRS names to include in this repo's walks, persisted so a LATER
    * no-flag build — and the fingerprint/refresh path, which never sees CLI
    * flags at all — behave identically to the invocation that set it. */

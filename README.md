@@ -596,6 +596,20 @@ npm test
 npm run cli -- build --deep .      # run the CLI from source
 ```
 
+### Deep-build hooks
+
+`graft build --deep --hook ./my-hook.mjs` can replace any of the four model-backed
+components without reimplementing the CLI. The ESM module may export
+`chatModel(ctx)`, `summarizer(ctx)`, `synthesizer(ctx)`, or
+`cruxSummarizer(ctx)` factories; omitted exports keep graft's built-in. Each
+factory receives the resolved provider config and lazy `ctx.defaults` factories,
+so it can wrap the default instead of replacing it outright.
+
+The selected path is recorded as `hooks` in `.graft/config.json`. A later build
+auto-loads it only when it is an absolute path outside the indexed repository.
+Repo-local code always requires an explicit `--hook` on that invocation: merely
+cloning a repository must never execute a module named by repository-local data.
+
 ---
 
 ## License

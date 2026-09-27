@@ -82,6 +82,15 @@ test("patchBuildConfig preserves unrelated persisted build choices", () => {
   });
 });
 
+test("hook module paths round-trip with the other local build choices", () => {
+  const d = fresh();
+  writeBuildConfig(d, { hooks: "/opt/graft/my-hook.mjs", includeDirs: ["vendor"] });
+  assert.deepEqual(readBuildConfig(d), {
+    hooks: "/opt/graft/my-hook.mjs",
+    includeDirs: ["vendor"],
+  });
+});
+
 // ── resolveContextDir / GRAFT_DIR ──────────────────────────────────────────
 //
 // Everything in this module keyed only by a project dir (stats cache, sync

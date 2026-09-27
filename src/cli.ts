@@ -10,6 +10,7 @@ import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Graft } from "./engine.js";
 import { resolveConfig, type EngineConfig } from "./ai/providers.js";
+import { applyHookModule, assertSafePersistedHook } from "./ai/hooks.js";
 import type { ProviderKind } from "./ai/llm/factory.js";
 import { formatCheckReport } from "./context/check.js";
 import { formatGraphCheckReport } from "./graph/check.js";
@@ -56,7 +57,7 @@ import { planRetract, runRetract, changed, type Retraction } from "./hosts/retra
 import { formatNonInteractiveHelp, formatPlan, runPicker } from "./cli-picker.js";
 import { homedir } from "node:os";
 import { formatUpgradeReport, formatVersionReport, getNpmViewVersion, readCurrentVersion, runUpgrade } from "./cli-meta.js";
-import { patchBuildConfig, type BuildConfig } from "./util/state.js";
+import { patchBuildConfig, readBuildConfig, type BuildConfig } from "./util/state.js";
 import { normalizePathPrefix } from "./util/paths.js";
 import { latestSession, formatSessionStats, sessionInputRate } from "./claude/session-metrics.js";
 import { setInputRate } from "./context/savings.js";
@@ -116,7 +117,8 @@ program
   .option("--provider <name>", "LLM wire format: openai | anthropic | litellm | orcarouter (env GRAFT_PROVIDER)")
   .option("--model <id>", "model id for the LLM pass (env GRAFT_MODEL)")
   .option("--api-key <key>", "provider API key (env GRAFT_API_KEY)")
-  .option("--base-url <url>", "OpenAI-compatible endpoint URL (env GRAFT_BASE_URL)");
+  .option("--base-url <url>", "OpenAI-compatible endpoint URL (env GRAFT_BASE_URL)")
+  .option("--hook <path>", "ESM module exporting deep-build component factories");
 
 interface GlobalOpts {
   dir?: string;
@@ -124,6 +126,7 @@ interface GlobalOpts {
   model?: string;
   apiKey?: string;
   baseUrl?: string;
+  hook?: string;
 }
 
 /** Config drawn from the global CLI flags (env + defaults fill the rest). */
@@ -139,6 +142,18 @@ function cliConfig(): EngineConfig {
 }
 
 const engineFrom = (): Graft => new Graft(cliConfig());
+
+/** Apply an explicit or safely persisted deep-build hook. */
+async function deepConfigFor(repoRoot: string): Promise<EngineConfig> {
+  const base = cliConfig();
+  const explicit = program.opts<GlobalOpts>().hook;
+  const stored = readBuildConfig(repoRoot)?.hooks;
+  const hook = explicit ?? (stored ? assertSafePersistedHook(repoRoot, stored) : undefined);
+  if (!hook) return base;
+  const configured = await applyHookModule(base, hook, repoRoot);
+  if (explicit) patchBuildConfig(repoRoot, { hooks: explicit });
+  return configured;
+}
 
 /**
  * Warn (never fail) when a user's `-e` extension has no parser, so it is never a silent
@@ -455,7 +470,17 @@ program
     if (Object.keys(buildConfigPatch).length > 0) {
       patchBuildConfig(resolve(dir), buildConfigPatch);
     }
-    const engine = engineFrom();
+    const buildRoot = resolve(dir);
+    let buildEngineConfig = cliConfig();
+    if (opts.deep) {
+      try {
+        buildEngineConfig = await deepConfigFor(buildRoot);
+      } catch (err) {
+        console.error(`✗ ${err instanceof Error ? err.message : String(err)}`);
+        process.exit(1);
+      }
+    }
+    const engine = new Graft(buildEngineConfig);
     const fmt = (o: Record<string, number>) =>
       Object.entries(o)
         .sort((a, b) => b[1] - a[1])
@@ -464,8 +489,11 @@ program
 
     // --deep needs a key; without one, degrade to the $0 structural build.
     let deep = opts.deep;
-    const resolved = resolveConfig(cliConfig());
-    if (deep && !resolved.apiKey) {
+    const resolved = resolveConfig(buildEngineConfig);
+    const fullyCustom =
+      !!resolved.chatModel ||
+      (!!resolved.summarizer && !!resolved.synthesizer && !!resolved.cruxSummarizer);
+    if (deep && !resolved.apiKey && !fullyCustom) {
       deep = false;
       console.error(
         "⚠ no API key set — falling back to the structural build (no LLM summaries).\n" +
@@ -480,14 +508,13 @@ program
     }
 
     // Workspace parent: build each child into its OWN graft/ + a workspace index.
-    const buildRoot = resolve(dir);
     const buildGlobalDir = program.opts<GlobalOpts>().dir;
     if (isWorkspaceBuildRoot(buildRoot, buildGlobalDir)) {
       await runWorkspaceBuild(buildRoot, {
         deep: !!deep,
         extensions: opts.extensions,
         concurrency,
-        childConfig: cliConfig(),
+        childConfig: buildEngineConfig,
         override: buildGlobalDir,
         includeDirs: opts.includeDir,
         followSubmodules: followSubmodulesWasExplicit ? opts.followSubmodules : undefined,

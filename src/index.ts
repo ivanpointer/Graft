@@ -44,3 +44,4 @@ export { ChatSummarizer } from "./ai/summarize.js";
 export type { Summarizer } from "./ai/summarize.js";
 export { ChatCruxSummarizer } from "./ai/crux.js";
 export type { CruxSummarizer, FileCruxInput, NodeCrux, NodeRef } from "./ai/crux.js";
+export type { GraftHookModule, HookContext, HookDefaults } from "./ai/hooks.js";
