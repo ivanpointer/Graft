@@ -79,6 +79,10 @@ const GEN_END = "<!-- context:generated:end -->";
 const MANIFEST_FILE = "manifest.json";
 /** Gitignored cache dir (per-file summaries + extractions), never committed. */
 export const CACHE_DIR = ".cache";
+/** Branch-local deep-build cache and the read-through seed copied from the main worktree. */
+export const SUMMARY_CACHE_FILE = "summaries.json";
+export const SEEDED_SUMMARY_CACHE_FILE = "summaries.seed.json";
+
 
 /** Env kill switch — same truthy parsing as `GRAFT_NO_REFRESH` in ../graph/refresh.ts. */
 function envTruthy(name: string): boolean {

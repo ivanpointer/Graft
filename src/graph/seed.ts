@@ -46,7 +46,12 @@ import {
 } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { ASK_INDEX_FILE } from "../ask/index-file.js";
-import { CACHE_DIR, contextDirFor } from "../context/node-file.js";
+import {
+  CACHE_DIR,
+  SEEDED_SUMMARY_CACHE_FILE,
+  SUMMARY_CACHE_FILE,
+  contextDirFor,
+} from "../context/node-file.js";
 import { EXTRACT_CACHE_PREFIX } from "./extract-cache.js";
 import { FINGERPRINT_PREFIX } from "./fingerprint.js";
 import { MEANING_SOURCE_CACHE_FILE } from "./meaning-source-cache.js";
@@ -223,6 +228,41 @@ export function seedGraph(root: string, opts: { contextDir?: string } = {}): See
     if (!existsSync(srcGraph)) return NOT_SEEDED; // parent never built either
     copyTree(srcDir, outDir);
     installGraph(srcGraph, wiringPath(outDir));
+    return { seeded: true, from: main };
+  } catch {
+    return NOT_SEEDED;
+  }
+}
+
+/**
+ * Refresh the read-through deep-build cache of a linked worktree from its main
+ * checkout. Unlike {@link seedGraph}, this runs only during an explicit concept
+ * build: summary/synthesis caches can be large and are not needed by queries.
+ *
+ * The seed has its own filename. The branch keeps writing `summaries.json`, while
+ * cache lookup may fall through to this snapshot. That preserves both histories
+ * instead of making the parent branch's value for a path overwrite the branch's.
+ */
+export function seedDeepCache(root: string, opts: { contextDir?: string } = {}): SeedResult {
+  if (opts.contextDir || seedDisabled()) return NOT_SEEDED;
+  try {
+    const dir = resolve(root);
+    const main = mainWorktreeRoot(dir);
+    if (!main) return NOT_SEEDED;
+    const source = join(contextDirFor(main), CACHE_DIR, SUMMARY_CACHE_FILE);
+    if (!existsSync(source)) return NOT_SEEDED;
+
+    const cacheDir = join(contextDirFor(dir), CACHE_DIR);
+    mkdirSync(cacheDir, { recursive: true });
+    const destination = join(cacheDir, SEEDED_SUMMARY_CACHE_FILE);
+    const tmp = `${destination}.tmp.${process.pid}`;
+    try {
+      copyFileSync(source, tmp);
+      renameSync(tmp, destination);
+    } catch (err) {
+      try { rmSync(tmp, { force: true }); } catch { /* best effort */ }
+      throw err;
+    }
     return { seeded: true, from: main };
   } catch {
     return NOT_SEEDED;
