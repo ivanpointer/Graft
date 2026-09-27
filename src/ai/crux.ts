@@ -112,17 +112,61 @@ const SYMBOLS_SCHEMA = {
 
 /** Cap the file text sent per request so one huge file can't blow the context. */
 const MAX_CODE_CHARS = 18_000;
+/** Keep a response comfortably below the fixed 8k output budget. */
+const MAX_TARGETS_PER_CALL = 64;
 
-function numberLines(source: string): string {
+function numberLines(source: string, firstLine = 1): string {
   const clipped =
     source.length > MAX_CODE_CHARS ? `${source.slice(0, MAX_CODE_CHARS)}\n… (truncated)` : source;
   return clipped
     .split("\n")
-    .map((line, i) => `${i + 1}\t${line}`)
+    .map((line, i) => `${firstLine + i}\t${line}`)
     .join("\n");
 }
 
-function userContent(input: FileCruxInput): string {
+interface CruxBatch extends FileCruxInput {
+  firstLine: number;
+}
+
+function sourceWindow(source: string, nodes: readonly NodeRef[]): { source: string; firstLine: number } {
+  const lines = source.split("\n");
+  const firstLine = Math.max(1, Math.min(...nodes.map((node) => node.startLine)));
+  const lastLine = Math.max(firstLine, Math.max(...nodes.map((node) => node.endLine)));
+  return {
+    source: lines.slice(firstLine - 1, lastLine).join("\n"),
+    firstLine,
+  };
+}
+
+/**
+ * Pack nearby targets while bounding both the number of response records and
+ * the source window shown for them. A single very large symbol remains one
+ * batch and is clipped by `numberLines`, matching the historical behaviour.
+ */
+function batches(input: FileCruxInput): CruxBatch[] {
+  const out: CruxBatch[] = [];
+  let nodes: NodeRef[] = [];
+  const flush = () => {
+    if (nodes.length === 0) return;
+    out.push({ path: input.path, nodes, ...sourceWindow(input.source, nodes) });
+    nodes = [];
+  };
+  for (const node of input.nodes) {
+    const candidate = [...nodes, node];
+    const window = sourceWindow(input.source, candidate);
+    if (
+      nodes.length > 0 &&
+      (candidate.length > MAX_TARGETS_PER_CALL || window.source.length > MAX_CODE_CHARS)
+    ) {
+      flush();
+    }
+    nodes.push(node);
+  }
+  flush();
+  return out;
+}
+
+function userContent(input: CruxBatch): string {
   const targets = input.nodes
     .map(
       (n) =>
@@ -131,7 +175,7 @@ function userContent(input: FileCruxInput): string {
     )
     .join("\n");
   const n = input.nodes.length;
-  return `FILE: ${input.path}\n\n${numberLines(input.source)}\n\nTARGETS (${n} — return all ${n}, one entry per id):\n${targets}`;
+  return `FILE: ${input.path}\n\n${numberLines(input.source, input.firstLine)}\n\nTARGETS (${n} — return all ${n}, one entry per id):\n${targets}`;
 }
 
 /**
@@ -226,6 +270,17 @@ export class ChatCruxSummarizer implements CruxSummarizer {
   async describeFile(input: FileCruxInput): Promise<NodeCrux[]> {
     this.lastMiss = null;
     if (input.nodes.length === 0) return [];
+    const results: NodeCrux[] = [];
+    for (const batch of batches(input)) {
+      const { parsed, response } = await this.describeBatch(batch);
+      results.push(...parsed);
+      const miss = classifyCruxMiss(response, parsed);
+      if (miss) this.lastMiss = miss;
+    }
+    return results;
+  }
+
+  private async describeBatch(input: CruxBatch): Promise<{ parsed: NodeCrux[]; response: ChatResponse }> {
     const res = await this.model.create({
       temperature: 0,
       maxTokens: 8192,
@@ -243,7 +298,6 @@ export class ChatCruxSummarizer implements CruxSummarizer {
       ],
     });
     const parsed = parseResults(argsFromResponse(res), input.nodes.map((n) => n.id), input.path);
-    this.lastMiss = classifyCruxMiss(res, parsed);
-    return parsed;
+    return { parsed, response: res };
   }
 }
