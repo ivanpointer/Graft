@@ -616,6 +616,13 @@ deterministic, while `Graft.askWithHooks()` runs an optional async reranker.
 Generated prose remains the responsibility of a summarizer or synthesizer: a
 validator may accept or reject it, but is not forced into a generative contract.
 
+`deepBuildRouter` receives changed files or symbols as a batch. It returns one
+decision per opaque item key: `process` runs the normal model pass, `skip` leaves
+the item retryable, and `reuse` promotes the supplied prior ready meaning to the
+new content hash. Reuse is ignored when no prior artifact exists; unknown and
+duplicate keys also fall back to `process`. This lets a bounded semantic backend
+save paid work without generating summaries or graph data itself.
+
 The selected path is recorded as `hooks` in `.graft/config.json`. A later build
 or query auto-loads it only when it is an absolute path outside the indexed repository.
 Repo-local code always requires an explicit `--hook` on that invocation: merely

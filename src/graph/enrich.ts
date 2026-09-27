@@ -23,7 +23,6 @@ import { formatCruxMiss, type CruxMissKind, type CruxSummarizer, type NodeCrux, 
 import { LlmFailureGate } from "../ai/failure.js";
 import type { Crux, NodeV1 } from "./types.js";
 import type { DeepBuildRouter } from "../ai/decisions.js";
-import { contentHash } from "../util/id.js";
 
 /** Cap on the stored crux: an over-long pick is trimmed to its leading slice. */
 const MAX_CRUX_LINES = 12;
@@ -46,7 +45,7 @@ export interface EnrichOptions {
    * never interleaves with a node mutation.
    */
   checkpoint?: () => void;
-  /** Optional bounded decision before each uncached per-file meaning call. */
+  /** Optional batched decision for each changed symbol before the per-file meaning call. */
   router?: DeepBuildRouter;
 }
 
@@ -59,6 +58,7 @@ function checkpointMs(): number {
 
 export interface EnrichStats {
   cached: number; // carried over from a prior identical body
+  reused: number; // prior meaning accepted for a changed body by the router
   computed: number; // freshly summarized by the LLM this run
   stale: number; // body changed, left with an outdated summary (no LLM this run)
   pending: number; // never summarized and not computed this run
@@ -85,6 +85,7 @@ export async function enrichGraph(
 ): Promise<EnrichStats> {
   const stats: EnrichStats = {
     cached: 0,
+    reused: 0,
     computed: 0,
     stale: 0,
     pending: 0,
@@ -152,7 +153,8 @@ export async function enrichGraph(
   await mapWithConcurrency(files, limit, async (path) => {
     const fileNodes = byFile.get(path)!;
     const source = sources.get(path)!;
-    const lineCount = source.split("\n").length;
+    const sourceLines = source.split("\n");
+    const lineCount = sourceLines.length;
 
     // Once the pass is fatal, the remaining files are not attempted: every call
     // would fail the same way, and on a metered gateway each one still costs a
@@ -175,26 +177,63 @@ export async function enrichGraph(
       return { id: n.id, kind: n.kind, signature: n.signature, startLine, endLine };
     });
 
+    const processNodes: NodeV1[] = [];
+    const processRefs: NodeRef[] = [];
+    let routed = false;
+    let decisions = new Map<string, "process" | "skip" | "reuse">();
     if (opts.router) {
-      const route = await opts.router.route({
+      const raw = await opts.router.route({
         phase: "symbol-meaning",
         path,
-        source,
-        contentHash: contentHash(source),
-        symbolCount: refs.length,
+        items: refs.map((ref, index) => {
+          const node = fileNodes[index];
+          const was = prior.get(node.id);
+          return {
+            key: `s${index}`,
+            source: sourceLines.slice(ref.startLine - 1, ref.endLine).join("\n"),
+            contentHash: node.body_hash,
+            prior: was?.summary_state === "ready" && was.summary
+              ? { contentHash: was.body_hash, value: was.summary, crux: was.crux ?? undefined }
+              : undefined,
+          };
+        }),
       });
-      if (route.action === "skip") {
-        stats.routedFiles++;
-        for (const node of fileNodes) {
-          if (node.summary_state === "stale") stats.stale++;
-          else stats.pending++;
-        }
-        opts.onProgress?.({ index: done++, total: files.length, node: path });
-        return;
+      for (const decision of raw) {
+        if (!/^s\d+$/.test(decision.key) || decisions.has(decision.key)) continue;
+        const index = Number(decision.key.slice(1));
+        if (index < 0 || index >= fileNodes.length) continue;
+        decisions.set(decision.key, decision.action);
       }
     }
 
-    const { results, error, quality } = await collectFileCrux(summarizer, path, source, refs);
+    for (let index = 0; index < fileNodes.length; index++) {
+      const node = fileNodes[index];
+      const action = decisions.get(`s${index}`) ?? "process";
+      const was = prior.get(node.id);
+      if (action === "reuse" && was?.summary_state === "ready" && was.summary) {
+        node.summary = was.summary;
+        node.crux = was.crux;
+        node.summary_state = "ready";
+        stats.reused++;
+        continue;
+      }
+      if (action === "skip") {
+        routed = true;
+        if (node.summary_state === "stale") stats.stale++;
+        else stats.pending++;
+        continue;
+      }
+      processNodes.push(node);
+      processRefs.push(refs[index]);
+    }
+
+    if (routed) stats.routedFiles++;
+    if (processRefs.length === 0) {
+      opts.onProgress?.({ index: done++, total: files.length, node: path });
+      return;
+    }
+
+    const { results, error, quality } = await collectFileCrux(summarizer, path, source, processRefs);
     let fileError = error;
     if (fileError) {
       stats.errors.push(`${path}: ${fileError}`);
@@ -202,7 +241,7 @@ export async function enrichGraph(
     }
 
     let applied = 0;
-    for (const node of fileNodes) {
+    for (const node of processNodes) {
       const r = results.size > 0 ? results.get(node.id) : undefined;
       // Empty / whitespace-only summaries are not success: caching them as
       // `ready` made the next `--deep` a permanent cache hit (#172).
@@ -220,7 +259,7 @@ export async function enrichGraph(
       applied++;
     }
 
-    if (!fileError && refs.length > 0 && applied === 0) {
+    if (!fileError && processRefs.length > 0 && applied === 0) {
       // collectFileCrux already labels a total miss; this catches "got entries
       // but every summary was blank" so the CLI's #127 degraded-exit path fires.
       fileError = cruxMissMessage(summarizer, "empty-parsed");

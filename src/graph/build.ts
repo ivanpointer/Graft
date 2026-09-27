@@ -91,7 +91,7 @@ export interface GraphBuildOptions {
   summarizer?: CruxSummarizer;
   /** Optional bounded chooser for deterministic edge candidate sets. */
   edgeDisambiguator?: EdgeDisambiguator;
-  /** Optional bounded decision before each uncached per-file meaning call. */
+  /** Optional batched decision for each changed symbol before the per-file meaning call. */
   router?: DeepBuildRouter;
   /** Max files summarized in parallel during the Tier-2 pass. Default is set in enrich. */
   concurrency?: number;

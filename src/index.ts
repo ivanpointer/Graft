@@ -67,7 +67,9 @@ export type {
   MeaningDecision,
   MeaningValidator,
   DeepBuildPhase,
+  PriorMeaning,
+  DeepBuildRouteItem,
   DeepBuildRouteInput,
-  DeepBuildRouteDecision,
+  DeepBuildItemDecision,
   DeepBuildRouter,
 } from "./ai/decisions.js";

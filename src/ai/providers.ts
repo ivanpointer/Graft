@@ -51,7 +51,7 @@ export interface EngineConfig {
   edgeDisambiguator?: EdgeDisambiguator;
   /** Accept or reject generated meaning without asking the hook to rewrite prose. */
   meaningValidator?: MeaningValidator;
-  /** Skip low-value files before an expensive deep-build pass. */
+  /** Decide per changed item whether to process, skip, or reuse its prior meaning. */
   deepBuildRouter?: DeepBuildRouter;
 }
 
