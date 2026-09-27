@@ -134,19 +134,65 @@ function userContent(input: FileCruxInput): string {
   return `FILE: ${input.path}\n\n${numberLines(input.source)}\n\nTARGETS (${n} — return all ${n}, one entry per id):\n${targets}`;
 }
 
+/**
+ * Resolve a model-returned id to one of the ids that was actually requested.
+ *
+ * Models sometimes obey "use the id verbatim" by echoing the rest of the
+ * human-readable target line too. Exact matches win; otherwise the longest
+ * requested id that prefixes the returned value wins. Longest-first matters
+ * when a nested symbol id extends another target id.
+ */
+function resolveReturnedId(raw: string, requestedIds: readonly string[]): string | undefined {
+  const returned = raw.trim();
+  const candidates = returned.startsWith("id=")
+    ? [returned, returned.slice("id=".length).trimStart()]
+    : [returned];
+  const requested = new Set(requestedIds);
+  for (const candidate of candidates) {
+    if (requested.has(candidate)) return candidate;
+  }
+  for (const candidate of candidates) {
+    const prefix = requestedIds
+      .filter((id) => {
+        if (!candidate.startsWith(id)) return false;
+        const next = candidate[id.length];
+        return next === undefined || /[\s|,;:)\]}]/.test(next);
+      })
+      .sort((a, b) => b.length - a.length)[0];
+    if (prefix) return prefix;
+  }
+  return undefined;
+}
+
 /** Normalize the tool's parsed argument object into a {@link NodeCrux} list. */
-function parseResults(obj: { symbols?: unknown } | undefined): NodeCrux[] {
+function parseResults(
+  obj: { symbols?: unknown } | undefined,
+  requestedIds: readonly string[],
+  path: string,
+): NodeCrux[] {
   if (!obj || !Array.isArray(obj.symbols)) return [];
   const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? Math.trunc(v) : 0);
-  return obj.symbols
-    .map((s) => s as Record<string, unknown>)
-    .filter((s) => typeof s.id === "string")
-    .map((s) => ({
-      id: s.id as string,
+  const out: NodeCrux[] = [];
+  for (const value of obj.symbols) {
+    const s = value as Record<string, unknown>;
+    if (typeof s.id !== "string") continue;
+    const id = resolveReturnedId(s.id, requestedIds);
+    if (!id) {
+      const shown = s.id.length > 160 ? `${s.id.slice(0, 157)}...` : s.id;
+      console.error(
+        `[graft] crux: ignored returned id ${JSON.stringify(shown)} for ${path}; ` +
+          "it does not match any requested target",
+      );
+      continue;
+    }
+    out.push({
+      id,
       summary: typeof s.summary === "string" ? s.summary.trim() : "",
       crux_start: num(s.crux_start),
       crux_end: num(s.crux_end),
-    }));
+    });
+  }
+  return out;
 }
 
 /**
@@ -196,7 +242,7 @@ export class ChatCruxSummarizer implements CruxSummarizer {
         { role: "user", content: userContent(input) },
       ],
     });
-    const parsed = parseResults(argsFromResponse(res));
+    const parsed = parseResults(argsFromResponse(res), input.nodes.map((n) => n.id), input.path);
     this.lastMiss = classifyCruxMiss(res, parsed);
     return parsed;
   }
