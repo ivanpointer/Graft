@@ -46,7 +46,7 @@ test("a hook module can export every bounded decision seam", async () => {
      export function cruxSelector() { return { async select() { return []; } }; }
      export function edgeDisambiguator() { return { async choose() { return []; } }; }
      export function meaningValidator() { return { async validate() { return []; } }; }
-     export function deepBuildRouter() { return { async route() { return { action: "process" }; } }; }\n`,
+     export function deepBuildRouter() { return { async route(input) { return input.items.map((item) => ({ key: item.key, action: "process" })); } }; }\n`,
   );
   const config = await applyHookModule({}, hook, dir);
   assert.equal(typeof config.askReranker?.rerank, "function");

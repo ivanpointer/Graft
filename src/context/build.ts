@@ -71,7 +71,7 @@ export interface BuildOptions {
   model: string;
   summarizer: Summarizer;
   synthesizer: Synthesizer;
-  /** Optional bounded decision before each uncached file-summary call. */
+  /** Optional decision to process, skip, or reuse each changed file summary. */
   router?: DeepBuildRouter;
   /** Files summarized in parallel during phase 1. Default 8. Raised via `graft build -j`. */
   concurrency?: number;
@@ -83,6 +83,8 @@ export interface BuildResult {
   files: number;
   summarized: number;
   cached: number;
+  /** Changed files whose prior summary was explicitly reused by the router. */
+  reused: number;
   batches: number;
   nodes: number;
   links: number;
@@ -176,6 +178,7 @@ export async function buildContext(dir: string, opts: BuildOptions): Promise<Bui
     files: 0,
     summarized: 0,
     cached: 0,
+    reused: 0,
     batches: 0,
     nodes: 0,
     links: 0,
@@ -211,13 +214,23 @@ export async function buildContext(dir: string, opts: BuildOptions): Promise<Bui
       return { rel, hash, summary: hit.summary };
     }
     if (opts.router) {
-      const route = await opts.router.route({
+      const [route] = await opts.router.route({
         phase: "file-summary",
         path: rel,
-        source: code,
-        contentHash: hash,
+        items: [{
+          key: "f0",
+          source: code,
+          contentHash: hash,
+          prior: hit ? { contentHash: hit.hash, value: hit.summary } : undefined,
+        }],
       });
-      if (route.action === "skip") {
+      if (route?.key === "f0" && route.action === "reuse" && hit) {
+        cache.summaries[rel] = { hash, summary: hit.summary };
+        result.reused++;
+        maybeFlush();
+        return { rel, hash, summary: hit.summary };
+      }
+      if (route?.key === "f0" && route.action === "skip") {
         result.routedFiles++;
         return { rel, hash };
       }

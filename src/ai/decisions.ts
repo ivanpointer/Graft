@@ -2,7 +2,7 @@ import type { AskHit, AskResult } from "../ask/ask.js";
 import type { FileCruxInput, NodeCrux, NodeRef, CruxSummarizer } from "./crux.js";
 import type { FileSummary, SynthNode, Synthesizer } from "./synthesize.js";
 import type { Summarizer } from "./summarize.js";
-import type { Kind, Relation } from "../graph/types.js";
+import type { Crux, Kind, Relation } from "../graph/types.js";
 
 export interface DecisionMetadata {
   confidence?: number;
@@ -126,21 +126,35 @@ export interface MeaningValidator {
 
 export type DeepBuildPhase = "file-summary" | "symbol-meaning";
 
+export interface PriorMeaning {
+  contentHash: string;
+  value: string;
+  crux?: Crux;
+}
+
+export interface DeepBuildRouteItem {
+  /** Opaque key that identifies the item within this request. */
+  key: string;
+  source: string;
+  contentHash: string;
+  /** The last ready meaning, when the source changed since it was produced. */
+  prior?: PriorMeaning;
+}
+
 export interface DeepBuildRouteInput {
   phase: DeepBuildPhase;
   path: string;
-  source: string;
-  contentHash: string;
-  symbolCount?: number;
+  items: readonly DeepBuildRouteItem[];
 }
 
-export interface DeepBuildRouteDecision extends DecisionMetadata {
-  action: "process" | "skip";
+export interface DeepBuildItemDecision extends DecisionMetadata {
+  key: string;
+  action: "process" | "skip" | "reuse";
   reason?: string;
 }
 
 export interface DeepBuildRouter {
-  route(input: DeepBuildRouteInput): Promise<DeepBuildRouteDecision>;
+  route(input: DeepBuildRouteInput): Promise<readonly DeepBuildItemDecision[]>;
 }
 
 export const defaultDecisionHooks = {
@@ -159,7 +173,9 @@ export const defaultDecisionHooks = {
   meaningValidator: (): MeaningValidator => ({
     async validate(input) { return input.candidates.map((candidate) => ({ key: candidate.key, accept: true })); },
   }),
-  deepBuildRouter: (): DeepBuildRouter => ({ async route() { return { action: "process" }; } }),
+  deepBuildRouter: (): DeepBuildRouter => ({
+    async route(input) { return input.items.map((item) => ({ key: item.key, action: "process" })); },
+  }),
 };
 
 /** Re-rank a larger deterministic shortlist while retaining every unmentioned hit. */

@@ -7,6 +7,7 @@ import {
   ValidatingSynthesizer,
 } from "../src/ai/decisions.js";
 import { disambiguateEdges } from "../src/graph/disambiguate.js";
+import { enrichGraph } from "../src/graph/enrich.js";
 import type { AskResult } from "../src/ask/ask.js";
 import type { NodeV1 } from "../src/graph/types.js";
 import { tmpRepo } from "./helpers.js";
@@ -133,11 +134,77 @@ test("deep-build router skips the symbol meaning call without making the build f
     cruxSummarizer: { async describeFile() { calls++; return []; } },
     deepBuildRouter: { async route(input) {
       assert.equal(input.phase, "symbol-meaning");
-      return { action: "skip", reason: "fixture" };
+      return input.items.map((item) => ({ key: item.key, action: "skip", reason: "fixture" }));
     } },
   });
   const result = await engine.graph(repo, { llm: true, concurrency: 1 });
   assert.equal(calls, 0);
   assert.equal(result.meaning.routedFiles, 1);
   assert.equal(result.meaning.failedFiles, 0);
+});
+
+test("deep-build router can reuse one prior symbol while recomputing another", async () => {
+  const path = "main.ts";
+  const source = "export function keep() { return 1; }\nexport function refresh() { return 2; }\n";
+  const current = [node(`${path}#keep`, path), node(`${path}#refresh`, path)];
+  current[0].span = "L1-L1";
+  current[0].body_hash = "keep-new";
+  current[1].span = "L2-L2";
+  current[1].body_hash = "refresh-new";
+  const previous = current.map((value, index): NodeV1 => ({
+    ...value,
+    body_hash: index === 0 ? "keep-old" : "refresh-old",
+    summary_state: "ready",
+    summary: index === 0 ? "old keep meaning" : "old refresh meaning",
+  }));
+  let calls = 0;
+  const stats = await enrichGraph(
+    current,
+    new Map(previous.map((value) => [value.id, value])),
+    new Map([[path, source]]),
+    {
+      concurrency: 1,
+      router: { async route(input) {
+        assert.equal(input.items.length, 2);
+        assert.equal(input.items[0].prior?.value, "old keep meaning");
+        return input.items.map((item) => ({ key: item.key, action: item.key === "s0" ? "reuse" : "process" }));
+      } },
+      summarizer: { async describeFile(input) {
+        calls++;
+        assert.deepEqual(input.nodes.map((value) => value.id), [`${path}#refresh`]);
+        return [{ id: `${path}#refresh`, summary: "new refresh meaning", crux_start: 2, crux_end: 2 }];
+      } },
+    },
+  );
+  assert.equal(calls, 1);
+  assert.equal(stats.reused, 1);
+  assert.equal(stats.computed, 1);
+  assert.equal(current[0].summary, "old keep meaning");
+  assert.equal(current[1].summary, "new refresh meaning");
+});
+
+test("deep-build router can reuse a prior file summary after its source changes", async () => {
+  const repo = tmpRepo("decision-route-summary");
+  const file = join(repo, "main.ts");
+  writeFileSync(file, "export const value = 1;\n");
+  const first = new Graft({
+    summarizer: { async summarize() { return "stable meaning"; } },
+    synthesizer: { async synthesize() { return []; } },
+  });
+  await first.init(repo);
+
+  writeFileSync(file, "export const value = 2;\n");
+  let calls = 0;
+  const second = new Graft({
+    summarizer: { async summarize() { calls++; return "unexpected"; } },
+    synthesizer: { async synthesize() { return []; } },
+    deepBuildRouter: { async route(input) {
+      assert.equal(input.phase, "file-summary");
+      assert.equal(input.items[0].prior?.value, "stable meaning");
+      return [{ key: input.items[0].key, action: "reuse" }];
+    } },
+  });
+  const result = await second.init(repo);
+  assert.equal(calls, 0);
+  assert.equal(result.reused, 1);
 });
