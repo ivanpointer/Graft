@@ -87,18 +87,23 @@ test("ChatCruxSummarizer tolerates a model echoing the whole target line as the 
       },
     ],
   });
-  const out = await new ChatCruxSummarizer(m).describeFile({
-    path: "a.ts",
-    source: "l1\nl2\nl3\nl4\nl5\n",
-    nodes: [
-      { id: "a.ts", kind: "file", signature: null, startLine: 1, endLine: 5 },
-      { id: "sym1", kind: "function", signature: null, startLine: 2, endLine: 3 },
-      { id: "sym2", kind: "function", signature: null, startLine: 4, endLine: 5 },
-    ],
-  });
+  const { result: out, err } = await withCapturedError(() =>
+    new ChatCruxSummarizer(m).describeFile({
+      path: "a.ts",
+      source: "l1\nl2\nl3\nl4\nl5\n",
+      nodes: [
+        { id: "a.ts", kind: "file", signature: null, startLine: 1, endLine: 5 },
+        { id: "sym1", kind: "function", signature: null, startLine: 2, endLine: 3 },
+        { id: "sym2", kind: "function", signature: null, startLine: 4, endLine: 5 },
+      ],
+    }),
+  );
   assert.deepEqual(
     out.map((r) => r.id),
-    ["a.ts", "sym1", "sym2", "nope | function | lines L1-L2"],
+    ["a.ts", "sym1", "sym2"],
+  );
+  assert.ok(
+    err.some((line) => /nope \| function/.test(line) && /does not match any requested target/.test(line)),
   );
 });
 

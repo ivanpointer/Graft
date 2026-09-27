@@ -160,18 +160,31 @@ export function normalizeTargetId(raw: string, expectedIds?: ReadonlySet<string>
 function parseResults(
   obj: { symbols?: unknown } | undefined,
   expectedIds: ReadonlySet<string>,
+  path: string,
 ): NodeCrux[] {
   if (!obj || !Array.isArray(obj.symbols)) return [];
   const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? Math.trunc(v) : 0);
-  return obj.symbols
-    .map((s) => s as Record<string, unknown>)
-    .filter((s) => typeof s.id === "string")
-    .map((s) => ({
-      id: normalizeTargetId(s.id as string, expectedIds),
+  const out: NodeCrux[] = [];
+  for (const value of obj.symbols) {
+    const s = value as Record<string, unknown>;
+    if (typeof s.id !== "string") continue;
+    const id = normalizeTargetId(s.id, expectedIds);
+    if (!expectedIds.has(id)) {
+      const shown = s.id.length > 160 ? `${s.id.slice(0, 157)}...` : s.id;
+      console.error(
+        `[graft] crux: ignored returned id ${JSON.stringify(shown)} for ${path}; ` +
+          "it does not match any requested target",
+      );
+      continue;
+    }
+    out.push({
+      id,
       summary: typeof s.summary === "string" ? s.summary.trim() : "",
       crux_start: num(s.crux_start),
       crux_end: num(s.crux_end),
-    }));
+    });
+  }
+  return out;
 }
 
 /**
@@ -224,6 +237,7 @@ export class ChatCruxSummarizer implements CruxSummarizer {
     const parsed = parseResults(
       argsFromResponse(res),
       new Set(input.nodes.map((n) => n.id)),
+      input.path,
     );
     this.lastMiss = classifyCruxMiss(res, parsed);
     return parsed;
