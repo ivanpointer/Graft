@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { buildContext } from "../src/context/build.js";
 import { BracketSynthesizer, PassthroughSummarizer } from "./helpers.js";
 import type { Summarizer } from "../src/ai/summarize.js";
+import type { FileSummary, Synthesizer, SynthNode } from "../src/ai/synthesize.js";
 
 const rmDir = (dir: string): void => rmSync(dir, { recursive: true, force: true });
 
@@ -101,6 +102,27 @@ test("a rerun re-summarizes nothing — resume is $0 for unchanged files", async
       summaries: Record<string, { source?: string }>;
     };
     assert.ok(Object.values(cache.summaries).every((entry) => typeof entry.source === "string"));
+  } finally {
+    rmDir(dir);
+  }
+});
+
+test("synthesis cache keys depend on summaries, not source-only changes", async () => {
+  const dir = fixture(1);
+  let synthCalls = 0;
+  const summarizer: Summarizer = { async summarize() { return "[[Stable concept]]"; } };
+  const base = new BracketSynthesizer();
+  const synthesizer: Synthesizer = {
+    async synthesize(files: FileSummary[]): Promise<SynthNode[]> {
+      synthCalls++;
+      return base.synthesize(files);
+    },
+  };
+  try {
+    await buildContext(dir, { model: "fake", summarizer, synthesizer });
+    writeFileSync(join(dir, "f0.ts"), "// implementation-only edit\nexport const v0 = 100;\n");
+    await buildContext(dir, { model: "fake", summarizer, synthesizer });
+    assert.equal(synthCalls, 1, "identical synthesis input must retain its cached concepts");
   } finally {
     rmDir(dir);
   }

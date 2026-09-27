@@ -19,6 +19,7 @@ import { readFingerprint } from "../graph/fingerprint.js";
 import { contentHash } from "../util/id.js";
 import { relPosix } from "../util/paths.js";
 import { readSourceFile } from "../util/source.js";
+import { seedDeepCache } from "../graph/seed.js";
 import { readFollowNestedRepos, readFollowSubmodules, readIncludeDirs } from "../util/state.js";
 import type { Summarizer } from "../ai/summarize.js";
 import { LlmFailureGate } from "../ai/failure.js";
@@ -30,6 +31,8 @@ import {
 import { completeLineChangeContext } from "../ai/change-context.js";
 import {
   CACHE_DIR,
+  SEEDED_SUMMARY_CACHE_FILE,
+  SUMMARY_CACHE_FILE,
   MANIFEST_VERSION,
   contextDirFor,
   deleteNode,
@@ -164,7 +167,9 @@ export async function buildContext(dir: string, opts: BuildOptions): Promise<Bui
   // the fingerprint) so out-of-scope files are never summarized or synthesized.
   const files = listContextFiles(root, outDir, exts, opts.onlyDirs);
 
-  const cache = loadCache(outDir);
+  seedDeepCache(root, { contextDir: opts.contextDir });
+  const cache = loadCache(outDir, SUMMARY_CACHE_FILE);
+  const seedCache = loadCache(outDir, SEEDED_SUMMARY_CACHE_FILE);
   // Flush the summary cache to disk during phase 1 so a build interrupted
   // partway (session/rate limit, crash, Ctrl-C) resumes without re-summarizing
   // the files it already did. Throttled to keep disk churn negligible; on the
@@ -212,12 +217,18 @@ export async function buildContext(dir: string, opts: BuildOptions): Promise<Bui
       return undefined;
     }
     const hash = contentHash(code);
-    const hit = cache.summaries[rel];
+    const local = cache.summaries[rel];
+    const seeded = seedCache.summaries[rel];
+    const hit = local?.hash === hash
+      ? local
+      : seeded?.hash === hash ? seeded : undefined;
     if (hit && hit.hash === hash) {
       // Gradually upgrade legacy cache entries so the next changed build can
-      // offer a trustworthy old/new window without another model call.
-      if (hit.source !== code) {
-        hit.source = code;
+      // offer a trustworthy old/new window without another model call. Promote
+      // a branch-seeded hit into the local cache at the same time, so later
+      // checkpoints and builds no longer depend on the sibling worktree.
+      cache.summaries[rel] = hit.source === code ? hit : { ...hit, source: code };
+      if (hit !== local || hit.source !== code) {
         maybeFlush();
       }
       result.cached++;
@@ -313,8 +324,8 @@ export async function buildContext(dir: string, opts: BuildOptions): Promise<Bui
   const synthNodes: SynthNode[] = [];
   for (let b = 0; b < batches.length; b++) {
     opts.onProgress?.({ phase: "synthesize", index: b, total: batches.length, file: `batch ${b + 1}` });
-    const key = batchKey(batches[b], hashByPath);
-    let nodes = cache.synth[key];
+    const key = batchKey(batches[b]);
+    let nodes = cache.synth[key] ?? seedCache.synth[key];
     // An empty array is a miss, not a hit: caching [] made a silent empty
     // synthesis permanent, the same trap #177 closed for the meaning pass (#129).
     const cached = Array.isArray(nodes) && nodes.length > 0;
@@ -322,6 +333,8 @@ export async function buildContext(dir: string, opts: BuildOptions): Promise<Bui
       nodes = await opts.synthesizer.synthesize(batches[b]);
       if (nodes.length > 0) cache.synth[key] = nodes;
       else delete cache.synth[key];
+    } else if (!cache.synth[key]) {
+      cache.synth[key] = nodes;
     }
     const links = nodes.reduce((n, node) => n + node.links.length, 0);
     console.error(
@@ -333,7 +346,7 @@ export async function buildContext(dir: string, opts: BuildOptions): Promise<Bui
   // Skip empty arrays so a failed batch is retried on the next --deep, not frozen.
   cache.synth = Object.fromEntries(
     batches.flatMap((batch) => {
-      const k = batchKey(batch, hashByPath);
+      const k = batchKey(batch);
       const v = cache.synth[k];
       return v && v.length > 0 ? [[k, v] as [string, SynthNode[]]] : [];
     }),
@@ -458,11 +471,11 @@ function batchBySize(files: FileSummary[], budget: number): FileSummary[][] {
   return batches;
 }
 
-/** Stable key for a batch: its files and their content hashes. */
-function batchKey(batch: FileSummary[], hashByPath: Map<string, string>): string {
+/** Stable key for exactly what synthesis sees, independent of source-only edits. */
+function batchKey(batch: FileSummary[]): string {
   return contentHash(
     batch
-      .map((f) => `${f.path}:${hashByPath.get(f.path) ?? ""}`)
+      .map((f) => `${f.path}:${contentHash(f.summary)}`)
       .sort()
       .join("\n"),
   );
@@ -481,12 +494,12 @@ function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-function cachePath(outDir: string): string {
-  return join(outDir, CACHE_DIR, "summaries.json");
+function cachePath(outDir: string, file: string): string {
+  return join(outDir, CACHE_DIR, file);
 }
 
-function loadCache(outDir: string): BuildCache {
-  const path = cachePath(outDir);
+function loadCache(outDir: string, file: string): BuildCache {
+  const path = cachePath(outDir, file);
   if (existsSync(path)) {
     try {
       const parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<BuildCache>;
@@ -499,7 +512,7 @@ function loadCache(outDir: string): BuildCache {
 }
 
 function saveCache(outDir: string, cache: BuildCache): void {
-  const path = cachePath(outDir);
+  const path = cachePath(outDir, SUMMARY_CACHE_FILE);
   mkdirSync(join(outDir, CACHE_DIR), { recursive: true });
   // Atomic: a kill mid-write can't leave a truncated (unparseable) cache that
   // would throw away every prior summary on the next load.

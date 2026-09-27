@@ -16,13 +16,16 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { buildContext } from "../src/context/build.js";
 import { buildGraph } from "../src/graph/build.js";
 import { fingerprintPath } from "../src/graph/fingerprint.js";
 import { ensureFreshGraph, refreshNote } from "../src/graph/refresh.js";
 import { mainWorktreeRoot, seedGraph } from "../src/graph/seed.js";
 import { readGraph, wiringPath } from "../src/graph/write.js";
 import { callTool } from "../src/mcp/tools.js";
-import { tmpRepo } from "./helpers.js";
+import { BracketSynthesizer, PassthroughSummarizer, tmpRepo } from "./helpers.js";
+import type { Summarizer } from "../src/ai/summarize.js";
+import type { Synthesizer } from "../src/ai/synthesize.js";
 
 const MATH = "export function add(a: number, b: number): number {\n  return a + b;\n}\n";
 const MUL = "export function mul(a: number, b: number): number {\n  return a * b;\n}\n";
@@ -336,6 +339,40 @@ test("`graft build` in a worktree starts from the parent's graph, not from scrat
   assert.equal(g.seededFrom, main, "reported, because the user never built here");
   assert.equal(g.parsed, 1, "only the file this checkout changed was re-parsed");
   assert.ok(g.cards > 0, "and the passive surface is rebuilt for this checkout");
+
+  rmSync(main, { recursive: true, force: true });
+  rmSync(wt, { recursive: true, force: true });
+});
+
+test("an explicit deep build reads through the main worktree's paid cache", async () => {
+  const main = gitRepo();
+  writeFileSync(join(main, "src", "math.ts"), `${MATH}// [[Math concept]]\n`);
+  git(main, "add", ".");
+  git(main, "commit", "-m", "add concept marker");
+  await buildContext(main, {
+    model: "fake",
+    summarizer: new PassthroughSummarizer(),
+    synthesizer: new BracketSynthesizer(),
+  });
+  const wt = addWorktree(main, "deep-cache");
+  let summaryCalls = 0;
+  let synthCalls = 0;
+  const summarizer: Summarizer = {
+    async summarize(): Promise<string> { summaryCalls++; return "unexpected"; },
+  };
+  const synthesizer: Synthesizer = {
+    async synthesize() { synthCalls++; return []; },
+  };
+
+  const result = await buildContext(wt, { model: "fake", summarizer, synthesizer });
+  assert.equal(summaryCalls, 0, "unchanged files use the main checkout's summaries");
+  assert.equal(synthCalls, 0, "unchanged summary batches use the main checkout's concepts");
+  assert.equal(result.cached, result.files);
+  assert.equal(
+    existsSync(join(outOf(wt), ".cache", "summaries.seed.json")),
+    true,
+    "the parent snapshot remains separate from branch-local cache writes",
+  );
 
   rmSync(main, { recursive: true, force: true });
   rmSync(wt, { recursive: true, force: true });
