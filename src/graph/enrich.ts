@@ -22,6 +22,8 @@
 import { formatCruxMiss, type CruxMissKind, type CruxSummarizer, type NodeCrux, type NodeRef } from "../ai/crux.js";
 import { LlmFailureGate } from "../ai/failure.js";
 import type { Crux, NodeV1 } from "./types.js";
+import type { DeepBuildRouter } from "../ai/decisions.js";
+import { contentHash } from "../util/id.js";
 
 /** Cap on the stored crux: an over-long pick is trimmed to its leading slice. */
 const MAX_CRUX_LINES = 12;
@@ -44,6 +46,8 @@ export interface EnrichOptions {
    * never interleaves with a node mutation.
    */
   checkpoint?: () => void;
+  /** Optional bounded decision before each uncached per-file meaning call. */
+  router?: DeepBuildRouter;
 }
 
 /** How often the crux pass flushes partial progress to disk. Read at call time (not
@@ -65,6 +69,8 @@ export interface EnrichStats {
   failedFiles: number;
   /** Files never attempted, because {@link EnrichStats.fatal} stopped the pass. */
   skippedFiles: number;
+  /** Files intentionally omitted by the configured deep-build router. */
+  routedFiles: number;
   /** Set when the pass gave up early: quota/auth rejection, or a run of
    * provider failures. Content-quality misses (#235) count in `failedFiles` but
    * do not set this. The reason is what `graft build --deep` exits non-zero with. */
@@ -85,6 +91,7 @@ export async function enrichGraph(
     errors: [],
     failedFiles: 0,
     skippedFiles: 0,
+    routedFiles: 0,
   };
 
   // Which nodes actually need an LLM call this run (after cache carry-over).
@@ -167,6 +174,25 @@ export async function enrichGraph(
       const [startLine, endLine] = spanLines(n.span, lineCount);
       return { id: n.id, kind: n.kind, signature: n.signature, startLine, endLine };
     });
+
+    if (opts.router) {
+      const route = await opts.router.route({
+        phase: "symbol-meaning",
+        path,
+        source,
+        contentHash: contentHash(source),
+        symbolCount: refs.length,
+      });
+      if (route.action === "skip") {
+        stats.routedFiles++;
+        for (const node of fileNodes) {
+          if (node.summary_state === "stale") stats.stale++;
+          else stats.pending++;
+        }
+        opts.onProgress?.({ index: done++, total: files.length, node: path });
+        return;
+      }
+    }
 
     const { results, error, quality } = await collectFileCrux(summarizer, path, source, refs);
     let fileError = error;

@@ -41,6 +41,8 @@ import { writeAskIndex } from "../ask/index-file.js";
 import { discoverScopes, scopeOf } from "./scopes.js";
 import type { GraphV1, Kind, NodeV1, Relation, ScopeV1 } from "./types.js";
 import type { CruxSummarizer } from "../ai/crux.js";
+import type { DeepBuildRouter, EdgeDisambiguator } from "../ai/decisions.js";
+import { disambiguateEdges } from "./disambiguate.js";
 
 export { listSourceFiles } from "./source-files.js";
 
@@ -87,6 +89,10 @@ export interface GraphBuildOptions {
   lsp?: boolean;
   /** Run the Tier-2 LLM meaning pass. Absent → Tier-1 only (cache is still preserved). */
   summarizer?: CruxSummarizer;
+  /** Optional bounded chooser for deterministic edge candidate sets. */
+  edgeDisambiguator?: EdgeDisambiguator;
+  /** Optional bounded decision before each uncached per-file meaning call. */
+  router?: DeepBuildRouter;
   /** Max files summarized in parallel during the Tier-2 pass. Default is set in enrich. */
   concurrency?: number;
   /** Repo-relative directory prefixes to limit the build to (`--only-dir`). When
@@ -323,6 +329,7 @@ export async function buildGraph(
     // Periodic durability flush of partial crux; the next run folds it back in by
     // body_hash, so an interrupted --deep run never repays the crux it computed.
     checkpoint: () => writeGraph(graph, outDir),
+    router: opts.router,
   });
   errors.push(...meaning.errors);
 
@@ -334,6 +341,14 @@ export async function buildGraph(
     const r = await enrichWithLsp(graph, root);
     graph.meta.edgeCount = graph.edges.length;
     opts.onProgress?.({ phase: "enrich", index: r.added, total: r.queried, file: `lsp:${r.server ?? "none"}` });
+  }
+
+  // Semantic choice is the last resort: it sees compiler-resolved edges and is
+  // never asked to override one. Returned opaque keys are validated against the
+  // deterministic candidate set before an edge is admitted.
+  if (opts.edgeDisambiguator) {
+    graph.edges.push(...await disambiguateEdges(nodes, rawEdges, graph.edges, opts.edgeDisambiguator));
+    graph.meta.edgeCount = graph.edges.length;
   }
 
   const graphPath = writeGraph(graph, outDir);

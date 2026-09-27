@@ -23,6 +23,7 @@ import { readFollowNestedRepos, readFollowSubmodules, readIncludeDirs } from "..
 import type { Summarizer } from "../ai/summarize.js";
 import { LlmFailureGate } from "../ai/failure.js";
 import type { FileSummary, SynthNode, Synthesizer } from "../ai/synthesize.js";
+import { MeaningRejectedError, type DeepBuildRouter } from "../ai/decisions.js";
 import {
   CACHE_DIR,
   MANIFEST_VERSION,
@@ -70,6 +71,8 @@ export interface BuildOptions {
   model: string;
   summarizer: Summarizer;
   synthesizer: Synthesizer;
+  /** Optional bounded decision before each uncached file-summary call. */
+  router?: DeepBuildRouter;
   /** Files summarized in parallel during phase 1. Default 8. Raised via `graft build -j`. */
   concurrency?: number;
   onProgress?: (info: BuildProgress) => void;
@@ -88,6 +91,8 @@ export interface BuildResult {
    * up — reported as data so the CLI can exit non-zero without reading messages (#127). */
   failedFiles: number;
   skippedFiles: number;
+  /** Files intentionally omitted by the configured deep-build router. */
+  routedFiles: number;
   /** Why the summarize phase stopped early, when it did. */
   fatal?: string;
 }
@@ -177,6 +182,7 @@ export async function buildContext(dir: string, opts: BuildOptions): Promise<Bui
     errors: [],
     failedFiles: 0,
     skippedFiles: 0,
+    routedFiles: 0,
   };
 
   // Phase 1: summarize each file, concurrent, content-hash cached.
@@ -204,6 +210,18 @@ export async function buildContext(dir: string, opts: BuildOptions): Promise<Bui
       result.cached++;
       return { rel, hash, summary: hit.summary };
     }
+    if (opts.router) {
+      const route = await opts.router.route({
+        phase: "file-summary",
+        path: rel,
+        source: code,
+        contentHash: hash,
+      });
+      if (route.action === "skip") {
+        result.routedFiles++;
+        return { rel, hash };
+      }
+    }
     // A cache hit is still served after the gate closes (it costs nothing) — only
     // the call is skipped.
     if (gate.stopped) {
@@ -220,7 +238,7 @@ export async function buildContext(dir: string, opts: BuildOptions): Promise<Bui
     } catch (err) {
       const message = errMsg(err);
       result.errors.push(`${rel}: ${message}`);
-      gate.record(message);
+      gate.record(message, { quality: err instanceof MeaningRejectedError });
       return { rel, hash }; // covered (counts against staleness) but not summarized
     }
   });

@@ -36,8 +36,9 @@ export type Kind =
  * (`graft build --lsp`) can promote an edge to compiler-grade `lsp_resolved`
  * (an exact server-confirmed target) or `lsp_dispatch` (an interface/virtual
  * candidate). Order matters: consumers that rank by provenance treat earlier
- * values as stronger. */
-export type Confidence = "lsp_resolved" | "lsp_dispatch" | "extracted" | "inferred";
+ * values as stronger. `semantic` is an opt-in bounded-choice recovery for an
+ * ambiguity the deterministic and LSP resolvers both left unresolved. */
+export type Confidence = "lsp_resolved" | "lsp_dispatch" | "extracted" | "inferred" | "semantic";
 
 /** Whether the LLM meaning-layer has been computed for a node. */
 export type SummaryState = "pending" | "ready" | "stale";

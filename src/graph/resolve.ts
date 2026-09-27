@@ -76,7 +76,7 @@ function familyOf(path: string): string | null {
  * An unknown family never filters: absence of data is not evidence of a mismatch,
  * and refusing edges for every extension graft cannot name would lose real ones.
  */
-function reachable(file: string, candidatePath: string): boolean {
+export function reachable(file: string, candidatePath: string): boolean {
   const from = familyOf(file);
   if (from === null) return true;
   const to = familyOf(candidatePath);

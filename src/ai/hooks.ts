@@ -7,12 +7,25 @@ import type { ChatModel } from "./llm/types.js";
 import { resolveConfig, type EngineConfig, type ResolvedConfig } from "./providers.js";
 import { ChatSummarizer, type Summarizer } from "./summarize.js";
 import { ChatSynthesizer, type Synthesizer } from "./synthesize.js";
+import {
+  defaultDecisionHooks,
+  type AskReranker,
+  type CruxSelector,
+  type DeepBuildRouter,
+  type EdgeDisambiguator,
+  type MeaningValidator,
+} from "./decisions.js";
 
 export interface HookDefaults {
   chatModel(): ChatModel;
   summarizer(): Summarizer;
   cruxSummarizer(): CruxSummarizer;
   synthesizer(): Synthesizer;
+  askReranker(): AskReranker;
+  cruxSelector(): CruxSelector;
+  edgeDisambiguator(): EdgeDisambiguator;
+  meaningValidator(): MeaningValidator;
+  deepBuildRouter(): DeepBuildRouter;
 }
 
 /** Context passed to every factory exported by a `--hook` module. */
@@ -28,6 +41,11 @@ export interface GraftHookModule {
   summarizer?(context: HookContext): Summarizer | Promise<Summarizer>;
   cruxSummarizer?(context: HookContext): CruxSummarizer | Promise<CruxSummarizer>;
   synthesizer?(context: HookContext): Synthesizer | Promise<Synthesizer>;
+  askReranker?(context: HookContext): AskReranker | Promise<AskReranker>;
+  cruxSelector?(context: HookContext): CruxSelector | Promise<CruxSelector>;
+  edgeDisambiguator?(context: HookContext): EdgeDisambiguator | Promise<EdgeDisambiguator>;
+  meaningValidator?(context: HookContext): MeaningValidator | Promise<MeaningValidator>;
+  deepBuildRouter?(context: HookContext): DeepBuildRouter | Promise<DeepBuildRouter>;
 }
 
 function defaultChatModel(config: ResolvedConfig): ChatModel {
@@ -79,6 +97,11 @@ export async function applyHookModule(
       summarizer: () => new ChatSummarizer(model()),
       cruxSummarizer: () => new ChatCruxSummarizer(model()),
       synthesizer: () => new ChatSynthesizer(model()),
+      askReranker: defaultDecisionHooks.askReranker,
+      cruxSelector: defaultDecisionHooks.cruxSelector,
+      edgeDisambiguator: defaultDecisionHooks.edgeDisambiguator,
+      meaningValidator: defaultDecisionHooks.meaningValidator,
+      deepBuildRouter: defaultDecisionHooks.deepBuildRouter,
     },
   };
 
@@ -99,6 +122,33 @@ export async function applyHookModule(
   }
   if (hooks.synthesizer) {
     next.synthesizer = requireMethod("synthesizer", await hooks.synthesizer(context), "synthesize");
+  }
+  if (hooks.askReranker) {
+    next.askReranker = requireMethod("askReranker", await hooks.askReranker(context), "rerank");
+  }
+  if (hooks.cruxSelector) {
+    next.cruxSelector = requireMethod("cruxSelector", await hooks.cruxSelector(context), "select");
+  }
+  if (hooks.edgeDisambiguator) {
+    next.edgeDisambiguator = requireMethod(
+      "edgeDisambiguator",
+      await hooks.edgeDisambiguator(context),
+      "choose",
+    );
+  }
+  if (hooks.meaningValidator) {
+    next.meaningValidator = requireMethod(
+      "meaningValidator",
+      await hooks.meaningValidator(context),
+      "validate",
+    );
+  }
+  if (hooks.deepBuildRouter) {
+    next.deepBuildRouter = requireMethod(
+      "deepBuildRouter",
+      await hooks.deepBuildRouter(context),
+      "route",
+    );
   }
   return next;
 }

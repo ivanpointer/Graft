@@ -3,6 +3,13 @@ import type { Synthesizer } from "./synthesize.js";
 import type { CruxSummarizer } from "./crux.js";
 import type { ChatModel } from "./llm/types.js";
 import type { ProviderKind } from "./llm/factory.js";
+import type {
+  AskReranker,
+  CruxSelector,
+  DeepBuildRouter,
+  EdgeDisambiguator,
+  MeaningValidator,
+} from "./decisions.js";
 
 /**
  * User-facing configuration. Anything omitted falls back to environment
@@ -36,6 +43,16 @@ export interface EngineConfig {
   summarizer?: Summarizer;
   /** Override the per-symbol crux summarizer. */
   cruxSummarizer?: CruxSummarizer;
+  /** Re-rank the deterministic `ask` shortlist without generating result ids. */
+  askReranker?: AskReranker;
+  /** Select a bounded source-span candidate for each symbol crux. */
+  cruxSelector?: CruxSelector;
+  /** Resolve only among deterministic candidates for otherwise ambiguous edges. */
+  edgeDisambiguator?: EdgeDisambiguator;
+  /** Accept or reject generated meaning without asking the hook to rewrite prose. */
+  meaningValidator?: MeaningValidator;
+  /** Skip low-value files before an expensive deep-build pass. */
+  deepBuildRouter?: DeepBuildRouter;
 }
 
 /** Fully-resolved configuration with all defaults applied. */
@@ -52,6 +69,11 @@ export interface ResolvedConfig {
   synthesizer?: Synthesizer;
   summarizer?: Summarizer;
   cruxSummarizer?: CruxSummarizer;
+  askReranker?: AskReranker;
+  cruxSelector?: CruxSelector;
+  edgeDisambiguator?: EdgeDisambiguator;
+  meaningValidator?: MeaningValidator;
+  deepBuildRouter?: DeepBuildRouter;
 }
 
 const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
@@ -113,5 +135,10 @@ export function resolveConfig(config: EngineConfig = {}): ResolvedConfig {
     synthesizer: config.synthesizer,
     summarizer: config.summarizer,
     cruxSummarizer: config.cruxSummarizer,
+    askReranker: config.askReranker,
+    cruxSelector: config.cruxSelector,
+    edgeDisambiguator: config.edgeDisambiguator,
+    meaningValidator: config.meaningValidator,
+    deepBuildRouter: config.deepBuildRouter,
   };
 }

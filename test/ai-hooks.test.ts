@@ -37,6 +37,25 @@ test("a hook can override one component and leave the others built in", async ()
   assert.equal(result?.[0]?.summary, "hooked");
 });
 
+test("a hook module can export every bounded decision seam", async () => {
+  const dir = fresh("graft-hook-decisions-");
+  const hook = join(dir, "hook.mjs");
+  writeFileSync(
+    hook,
+    `export function askReranker() { return { async rerank() { return { order: [] }; } }; }
+     export function cruxSelector() { return { async select() { return []; } }; }
+     export function edgeDisambiguator() { return { async choose() { return []; } }; }
+     export function meaningValidator() { return { async validate() { return []; } }; }
+     export function deepBuildRouter() { return { async route() { return { action: "process" }; } }; }\n`,
+  );
+  const config = await applyHookModule({}, hook, dir);
+  assert.equal(typeof config.askReranker?.rerank, "function");
+  assert.equal(typeof config.cruxSelector?.select, "function");
+  assert.equal(typeof config.edgeDisambiguator?.choose, "function");
+  assert.equal(typeof config.meaningValidator?.validate, "function");
+  assert.equal(typeof config.deepBuildRouter?.route, "function");
+});
+
 test("a chatModel hook becomes the transport used by default component factories", async () => {
   const dir = fresh("graft-hook-model-");
   const hook = join(dir, "hook.mjs");

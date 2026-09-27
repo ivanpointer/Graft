@@ -118,7 +118,7 @@ program
   .option("--model <id>", "model id for the LLM pass (env GRAFT_MODEL)")
   .option("--api-key <key>", "provider API key (env GRAFT_API_KEY)")
   .option("--base-url <url>", "OpenAI-compatible endpoint URL (env GRAFT_BASE_URL)")
-  .option("--hook <path>", "ESM module exporting deep-build component factories");
+  .option("--hook <path>", "trusted ESM module exporting Graft component and decision hooks");
 
 interface GlobalOpts {
   dir?: string;
@@ -143,8 +143,8 @@ function cliConfig(): EngineConfig {
 
 const engineFrom = (): Graft => new Graft(cliConfig());
 
-/** Apply an explicit or safely persisted deep-build hook. */
-async function deepConfigFor(repoRoot: string): Promise<EngineConfig> {
+/** Apply an explicit or safely persisted hook module. */
+async function hookedConfigFor(repoRoot: string): Promise<EngineConfig> {
   const base = cliConfig();
   const explicit = program.opts<GlobalOpts>().hook;
   const stored = readBuildConfig(repoRoot)?.hooks;
@@ -474,7 +474,7 @@ program
     let buildEngineConfig = cliConfig();
     if (opts.deep) {
       try {
-        buildEngineConfig = await deepConfigFor(buildRoot);
+        buildEngineConfig = await hookedConfigFor(buildRoot);
       } catch (err) {
         console.error(`✗ ${err instanceof Error ? err.message : String(err)}`);
         process.exit(1);
@@ -541,7 +541,7 @@ program
       });
       process.stderr.write("\n");
       console.log(
-        `✓ concepts: ${c.nodes} nodes, ${c.links} links from ${c.files} files (${c.summarized} read, ${c.cached} cached)`,
+        `✓ concepts: ${c.nodes} nodes, ${c.links} links from ${c.files} files (${c.summarized} read, ${c.cached} cached, ${c.routedFiles} routed out)`,
       );
       for (const e of c.errors) console.error(`✗ ${e}`);
       conceptErrors = c.errors;
@@ -570,7 +570,7 @@ program
     if (g.seededFrom) console.log(`  seeded: copied a starting graph from ${g.seededFrom} (git worktree)`);
     if (deep) {
       const m = g.meaning;
-      console.log(`  meaning: ${m.computed} computed, ${m.cached} cached, ${m.stale} stale, ${m.pending} pending`);
+      console.log(`  meaning: ${m.computed} computed, ${m.cached} cached, ${m.stale} stale, ${m.pending} pending, ${m.routedFiles} routed out`);
     }
     console.log(`  → ${g.contextDir}`);
     // The activation event. Everything here is a bucket or a fixed label: repo
@@ -649,10 +649,10 @@ program
       });
       return;
     }
-    const engine = engineFrom();
     let r;
     try {
-      r = engine.ask(dir, query, { limit: Number(opts.limit), source: opts.source, full: opts.full, in: opts.in, graphRank: opts.graphRank });
+      const engine = new Graft(await hookedConfigFor(dir));
+      r = await engine.askWithHooks(dir, query, { limit: Number(opts.limit), source: opts.source, full: opts.full, in: opts.in, graphRank: opts.graphRank });
     } catch (err) {
       console.error(`✗ ${err instanceof Error ? err.message : String(err)}`);
       process.exit(1);

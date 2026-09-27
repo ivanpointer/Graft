@@ -50,6 +50,7 @@ import { readSourceFile } from "../util/source.js";
 import { counts, tokenize, type AskIndex, type AskIndexDoc } from "./index-file.js";
 import { rulesForPointers, formatRules, type AppliedRule } from "../brain/attach.js";
 import { readLink, readRulesCache } from "../brain/link.js";
+import { rerankAskResult, type AskReranker } from "../ai/decisions.js";
 
 export interface AskHit {
   kind: "concept" | "symbol" | "caller" | "callee";
@@ -1397,6 +1398,41 @@ export function ask(dir: string, query: string, opts: AskOptions = {}): AskResul
     if (applied.length) result.rules = applied;
   }
   return result;
+}
+
+/**
+ * Build a larger deterministic shortlist, let a bounded hook reorder it, then
+ * apply source/rules/savings to the final list. The synchronous {@link ask}
+ * path stays unchanged for callers that do not configure a networked reranker.
+ */
+export async function askWithReranker(
+  dir: string,
+  query: string,
+  opts: AskOptions,
+  reranker: AskReranker,
+): Promise<AskResult> {
+  const limit = opts.limit ?? 8;
+  const result = ask(dir, query, {
+    ...opts,
+    source: false,
+    limit: Math.max(limit, limit * 4),
+  });
+  if (result.mode !== "lexical") return ask(dir, query, opts);
+  const reranked = await rerankAskResult(query, result, reranker, limit);
+  // These describe the deterministic top hit and latent baseline queues, not
+  // the hook's new order. Omitting them is safer than publishing stale signals.
+  delete reranked.coverage;
+  delete reranked.coverageStrong;
+  delete reranked.ranking;
+  if (opts.source) {
+    const root = resolve(dir);
+    const corpus = loadCorpus(contextDirFor(root, opts.contextDir));
+    inlineSource(root, reranked.hits, corpus.graph, opts.full ?? false);
+    reranked.saved = baselineFor(reranked.hits, corpus.graph);
+    const applied = attachBrainRules(root, reranked.hits, corpus.graph);
+    if (applied.length) reranked.rules = applied;
+  }
+  return reranked;
 }
 
 /** Rules for this answer's symbols, or [] when the repo has no brain linked,

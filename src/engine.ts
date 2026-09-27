@@ -20,7 +20,13 @@ import { buildContext, CODE_EXTENSIONS, type BuildProgress, type BuildResult } f
 import { checkContext, type CheckResult } from "./context/check.js";
 import { buildGraph, type GraphBuildOptions, type GraphBuildResult } from "./graph/build.js";
 import { checkGraph, type GraphCheckResult } from "./graph/check.js";
-import { ask, type AskResult } from "./ask/ask.js";
+import { ask, askWithReranker, type AskResult } from "./ask/ask.js";
+import {
+  SelectingCruxSummarizer,
+  ValidatingCruxSummarizer,
+  ValidatingSummarizer,
+  ValidatingSynthesizer,
+} from "./ai/decisions.js";
 
 export { CODE_EXTENSIONS };
 export type { BuildResult, BuildProgress, CheckResult, GraphBuildResult, GraphCheckResult, AskResult };
@@ -68,6 +74,7 @@ export class Graft {
       model: this.modelLabel(),
       summarizer: this.summarizer(),
       synthesizer: this.synthesizer(),
+      router: this.cfg.deepBuildRouter,
       onProgress: opts.onProgress,
     });
   }
@@ -92,6 +99,8 @@ export class Graft {
     return buildGraph(dir, {
       contextDir: this.cfg.contextDir,
       summarizer: opts.llm ? this.cruxSummarizer() : undefined,
+      edgeDisambiguator: opts.llm ? this.cfg.edgeDisambiguator : undefined,
+      router: opts.llm ? this.cfg.deepBuildRouter : undefined,
       concurrency: opts.concurrency,
       reuse: opts.reuse,
       lsp: opts.lsp,
@@ -114,6 +123,19 @@ export class Graft {
       in: opts.in,
       graphRank: opts.graphRank,
     });
+  }
+
+  /**
+   * Async query path used when a hook supplies semantic re-ranking. The normal
+   * synchronous {@link ask} API remains source-compatible for deterministic use.
+   */
+  async askWithHooks(
+    dir: string,
+    query: string,
+    opts: { limit?: number; source?: boolean; full?: boolean; in?: string; graphRank?: boolean } = {},
+  ): Promise<AskResult> {
+    if (!this.cfg.askReranker) return this.ask(dir, query, opts);
+    return askWithReranker(dir, query, opts, this.cfg.askReranker);
   }
 
   private _chatModel?: ChatModel;
@@ -139,22 +161,31 @@ export class Graft {
   }
 
   private synthesizer(): Synthesizer {
-    return this.cfg.synthesizer ?? new ChatSynthesizer(this.chatModel());
+    const base = this.cfg.synthesizer ?? new ChatSynthesizer(this.chatModel());
+    return this.cfg.meaningValidator ? new ValidatingSynthesizer(base, this.cfg.meaningValidator) : base;
   }
 
   /** Per-node crux summarizer for the code graph's Tier-2 pass. */
   private cruxSummarizer(): CruxSummarizer {
-    return this.cfg.cruxSummarizer ?? new ChatCruxSummarizer(this.chatModel());
+    let summarizer = this.cfg.cruxSummarizer ?? new ChatCruxSummarizer(this.chatModel());
+    if (this.cfg.cruxSelector) summarizer = new SelectingCruxSummarizer(summarizer, this.cfg.cruxSelector);
+    if (this.cfg.meaningValidator) summarizer = new ValidatingCruxSummarizer(summarizer, this.cfg.meaningValidator);
+    return summarizer;
   }
 
   private summarizer(): Summarizer {
-    return this.cfg.summarizer ?? new ChatSummarizer(this.chatModel());
+    const base = this.cfg.summarizer ?? new ChatSummarizer(this.chatModel());
+    return this.cfg.meaningValidator ? new ValidatingSummarizer(base, this.cfg.meaningValidator) : base;
   }
 
   /** Human label for the active model, recorded in the manifest. */
   private modelLabel(): string {
     if (this.cfg.chatModel) return this.cfg.chatModel.label;
-    if (this.cfg.synthesizer || this.cfg.summarizer || this.cfg.cruxSummarizer) return "custom";
+    if (
+      this.cfg.synthesizer || this.cfg.summarizer || this.cfg.cruxSummarizer ||
+      this.cfg.cruxSelector || this.cfg.edgeDisambiguator ||
+      this.cfg.meaningValidator || this.cfg.deepBuildRouter
+    ) return "custom";
     return `${this.cfg.provider}:${this.cfg.model}`;
   }
 }

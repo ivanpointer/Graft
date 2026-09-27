@@ -596,17 +596,28 @@ npm test
 npm run cli -- build --deep .      # run the CLI from source
 ```
 
-### Deep-build hooks
+### Component and decision hooks
 
-`graft build --deep --hook ./my-hook.mjs` can replace any of the four model-backed
-components without reimplementing the CLI. The ESM module may export
+`graft --hook ./my-hook.mjs build --deep` can replace any of the four model-backed
+components without reimplementing the CLI. The same flag on `graft ask` enables
+query-time decisions. The ESM module may export
 `chatModel(ctx)`, `summarizer(ctx)`, `synthesizer(ctx)`, or
-`cruxSummarizer(ctx)` factories; omitted exports keep graft's built-in. Each
+`cruxSummarizer(ctx)` factories. It may also export narrow, non-generative
+factories: `askReranker(ctx)`, `cruxSelector(ctx)`,
+`edgeDisambiguator(ctx)`, `meaningValidator(ctx)`, and
+`deepBuildRouter(ctx)`. Omitted exports keep graft's built-in behavior. Each
 factory receives the resolved provider config and lazy `ctx.defaults` factories,
-so it can wrap the default instead of replacing it outright.
+so it can wrap a default instead of replacing it outright.
+
+Decision hooks receive deterministic candidates with opaque keys. Their output
+is checked against those keys before it can change a rank, source span, or edge;
+they cannot invent graph ids. The existing synchronous `Graft.ask()` API remains
+deterministic, while `Graft.askWithHooks()` runs an optional async reranker.
+Generated prose remains the responsibility of a summarizer or synthesizer: a
+validator may accept or reject it, but is not forced into a generative contract.
 
 The selected path is recorded as `hooks` in `.graft/config.json`. A later build
-auto-loads it only when it is an absolute path outside the indexed repository.
+or query auto-loads it only when it is an absolute path outside the indexed repository.
 Repo-local code always requires an explicit `--hook` on that invocation: merely
 cloning a repository must never execute a module named by repository-local data.
 

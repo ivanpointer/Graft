@@ -45,3 +45,29 @@ export type { Summarizer } from "./ai/summarize.js";
 export { ChatCruxSummarizer } from "./ai/crux.js";
 export type { CruxSummarizer, FileCruxInput, NodeCrux, NodeRef } from "./ai/crux.js";
 export type { GraftHookModule, HookContext, HookDefaults } from "./ai/hooks.js";
+export type {
+  DecisionMetadata,
+  AskCandidate,
+  AskRerankInput,
+  AskRerankDecision,
+  AskReranker,
+  CruxCandidate,
+  SymbolCruxCandidates,
+  CruxSelectionInput,
+  CruxSelection,
+  CruxSelector,
+  EdgeCandidate,
+  AmbiguousEdge,
+  EdgeDisambiguationInput,
+  EdgeDecision,
+  EdgeDisambiguator,
+  MeaningKind,
+  MeaningCandidate,
+  MeaningValidationInput,
+  MeaningDecision,
+  MeaningValidator,
+  DeepBuildPhase,
+  DeepBuildRouteInput,
+  DeepBuildRouteDecision,
+  DeepBuildRouter,
+} from "./ai/decisions.js";
