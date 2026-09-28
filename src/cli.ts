@@ -61,7 +61,7 @@ import { normalizePathPrefix } from "./util/paths.js";
 import { latestSession, formatSessionStats, sessionInputRate } from "./claude/session-metrics.js";
 import { invocationIdLine, setInputRate } from "./context/savings.js";
 import { beginInvocation, setInvocationRepo, takeInvocation } from "./stats/current.js";
-import { formatStatsReport, readStatsReport, recordInvocation } from "./stats/store.js";
+import { formatStatsReport, readGraphBuildReport, readStatsReport, recordInvocation } from "./stats/store.js";
 import { recordGraftConfiguration } from "./stats/config.js";
 import { formatUpdateNudge, maybeRefreshInBackground, readUpdateCache, refreshUpdateCache, wiredHostIds, writeStamp } from "./upkeep.js";
 import {
@@ -735,7 +735,7 @@ program
   .description("Show this agent session's graft-vs-source usage mix and tokens saved")
   .argument(...DIR_ARG)
   .option("--json", "output the session stats as JSON")
-  .option("--machine", "report exact machine-local Graft usage instead of the latest agent session")
+  .option("--machine", "report machine-local Graft usage and recent graph build performance")
   .option("--since <days>", "with --machine, include only the last N days")
   .action(async (dirArg: string | undefined, opts: { json?: boolean; machine?: boolean; since?: string }) => {
     if (opts.machine) {
@@ -746,7 +746,11 @@ program
         return;
       }
       const report = await readStatsReport({ sinceDays: rawDays });
-      console.log(opts.json ? JSON.stringify(report, null, 2) : formatStatsReport(report));
+      const graphDays = rawDays ?? 30;
+      const graphBuilds = await readGraphBuildReport({ sinceDays: graphDays });
+      console.log(opts.json
+        ? JSON.stringify({ ...report, graphBuilds: { sinceDays: graphDays, ...graphBuilds } }, null, 2)
+        : formatStatsReport(report, graphBuilds, graphDays));
       return;
     }
     // Reads local session JSON only — no graph, no network. This is how a Cursor

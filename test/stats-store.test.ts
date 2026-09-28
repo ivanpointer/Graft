@@ -216,6 +216,8 @@ test('v7 machine database upgrades to graph build facts without losing existing 
   assert.equal((await readStatsReport({ home })).savedTokens, 100);
   const report = await readGraphBuildReport({ home });
   assert.equal(report.attempts, 1);
+  assert.equal(report.totalDurationMs, 15.5);
+  assert.equal(report.avgDurationMs, 15.5);
   assert.equal(report.latest?.sourceBytes, 123);
   assert.equal(report.latest?.phases.extract, 8);
   const upgraded = new DatabaseSync(statsPath(home), { readOnly: true });

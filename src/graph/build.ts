@@ -160,6 +160,8 @@ export async function buildGraph(
   let phaseStarted = started;
   let phase: GraphBuildPhase = 'enumerate';
   const phases: GraphBuildFact['phases'] = {};
+  // One active phase at a time: each mark closes the previous wall-clock span,
+  // so nested work is counted once and a failed attempt retains its last span.
   const measure: BuildMeasurement = {
     mode: 'cold',
     mark(next?: GraphBuildPhase) {

@@ -60,6 +60,7 @@ export interface GraphBuildReport {
   attempts: number;
   completed: number;
   failed: number;
+  totalDurationMs: number;
   avgDurationMs: number;
   latest: GraphBuildFact | null;
 }
@@ -496,7 +497,7 @@ export async function recordGraphBuild(fact: GraphBuildFact, home?: string): Pro
 
 /** Compact machine-local graph trend, independently filterable from invocation stats. */
 export async function readGraphBuildReport(opts: { sinceDays?: number; repo?: string; home?: string } = {}): Promise<GraphBuildReport> {
-  const empty: GraphBuildReport = { attempts: 0, completed: 0, failed: 0, avgDurationMs: 0, latest: null };
+  const empty: GraphBuildReport = { attempts: 0, completed: 0, failed: 0, totalDurationMs: 0, avgDurationMs: 0, latest: null };
   try {
     return await withDatabase(opts.home, (db) => {
       const filters: string[] = [];
@@ -509,7 +510,8 @@ export async function readGraphBuildReport(opts: { sinceDays?: number; repo?: st
       const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
       const totals = db.prepare(`
         SELECT COUNT(*) AS attempts, SUM(outcome != 'failed') AS completed,
-               SUM(outcome = 'failed') AS failed, AVG(duration_ms) AS avgDurationMs
+               SUM(outcome = 'failed') AS failed, SUM(duration_ms) AS totalDurationMs,
+               AVG(duration_ms) AS avgDurationMs
         FROM graph_builds ${where}
       `).get(...args) as Record<string, unknown>;
       const row = db.prepare(`
@@ -527,7 +529,8 @@ export async function readGraphBuildReport(opts: { sinceDays?: number; repo?: st
       }
       return {
         attempts: Number(totals.attempts), completed: Number(totals.completed ?? 0),
-        failed: Number(totals.failed ?? 0), avgDurationMs: Number(totals.avgDurationMs ?? 0),
+        failed: Number(totals.failed ?? 0), totalDurationMs: Number(totals.totalDurationMs ?? 0),
+        avgDurationMs: Number(totals.avgDurationMs ?? 0),
         latest: row ? {
           occurredAt: String(row.occurred_at), repo: String(row.repo_path),
           trigger: row.trigger as GraphBuildFact['trigger'], mode: row.mode as GraphBuildFact['mode'],
@@ -791,10 +794,10 @@ export async function readStatsReport(opts: { sinceDays?: number; home?: string 
   }
 }
 
-export function formatStatsReport(report: StatsReport): string {
-  if (report.calls === 0) return 'graft machine stats: no recorded calls yet.';
-  const lines = [
-    'graft machine stats',
+export function formatStatsReport(report: StatsReport, graphBuilds?: GraphBuildReport, graphDays = 30): string {
+  if (report.calls === 0 && !graphBuilds) return 'graft machine stats: no recorded calls yet.';
+  const lines = ['graft machine stats'];
+  if (report.calls > 0) lines.push(
     `  calls:         ${report.calls.toLocaleString()} (${report.successfulCalls.toLocaleString()} successful)`,
     `  repos:         ${report.repos.toLocaleString()}`,
     `  sessions:      ${report.sessions.toLocaleString()} (when supplied by the host)`,
@@ -802,7 +805,7 @@ export function formatStatsReport(report: StatsReport): string {
     `  avg per call:  ~${report.avgSavedTokens.toLocaleString()} tokens`,
     `  first seen:    ${report.firstSeen}`,
     `  last seen:     ${report.lastSeen}`,
-  ];
+  );
   if (report.commands.length) {
     lines.push('  by command:');
     for (const row of report.commands) {
@@ -813,6 +816,23 @@ export function formatStatsReport(report: StatsReport): string {
     lines.push('  by model / reasoning effort:');
     for (const row of report.modelEfforts.slice(0, 12)) {
       lines.push(`    ${row.provider}/${row.model} (${row.reasoningEffort})  ${String(row.calls).padStart(5)} calls  ~${row.savedTokens.toLocaleString()} saved`);
+    }
+  }
+  if (graphBuilds) {
+    const attempts = graphBuilds.attempts.toLocaleString();
+    lines.push(`  graph builds (last ${graphDays} days): ${attempts} ${graphBuilds.attempts === 1 ? 'attempt' : 'attempts'} (${graphBuilds.completed.toLocaleString()} completed, ${graphBuilds.failed.toLocaleString()} failed)`);
+    if (graphBuilds.attempts > 0) {
+      const ms = (n: number) => `${n.toLocaleString(undefined, { maximumFractionDigits: 1 })} ms`;
+      const count = (n: number | undefined) => n === undefined ? 'unknown' : n.toLocaleString();
+      const latest = graphBuilds.latest!;
+      lines.push(
+        `    total / avg: ${ms(graphBuilds.totalDurationMs)} / ${ms(graphBuilds.avgDurationMs)}`,
+        `    latest: ${latest.occurredAt}  ${latest.repo}  ${latest.trigger}/${latest.mode}  ${latest.outcome}`,
+        `      source: ${count(latest.sourceFileCount)} files, ${count(latest.sourceBytes)} bytes`,
+        `      extraction: ${count(latest.parsedCount)} parsed, ${count(latest.reusedCount)} reused`,
+        `      graph: ${count(latest.nodeCount)} nodes, ${count(latest.edgeCount)} edges`,
+        `      duration: ${ms(latest.durationMs)}`,
+      );
     }
   }
   return lines.join('\n');

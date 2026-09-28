@@ -61,6 +61,14 @@ test('graph build facts track exact source size, modes, refresh, phases, and fai
         ['enrich', 'enumerate', 'extract', 'prepare', 'resolve', 'write']);
       assert.equal((db.prepare('SELECT COUNT(*) AS n FROM graph_build_phases').get() as { n: number }).n, 27,
         'the interrupted attempt retains completed and active phase timing');
+      const timings = db.prepare(`
+        SELECT b.duration_ms AS total, SUM(p.duration_ms) AS phases
+        FROM graph_builds b JOIN graph_build_phases p ON p.build_id = b.id
+        GROUP BY b.id
+      `).all() as Array<{ total: number; phases: number }>;
+      assert.equal(timings.length, 5);
+      assert.ok(timings.every(({ total, phases }) => phases <= total + 0.01),
+        'phase durations partition build work and never double-count nested time');
     } finally { db.close(); }
     const report = await readGraphBuildReport({ home, repo });
     assert.equal(report.attempts, 5);
