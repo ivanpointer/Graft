@@ -16,7 +16,7 @@ function fresh(): string { return mkdtempSync(join(tmpdir(), 'graft-picker-')); 
 
 function fullHome(): string {
   const home = fresh();
-  for (const d of ['.codex', '.cursor', '.gemini', '.adal', join('.config', 'opencode')]) {
+  for (const d of ['.codex', '.cursor', '.gemini', '.adal', join('.pi', 'agent'), join('.config', 'opencode')]) {
     mkdirSync(join(home, d), { recursive: true });
   }
   return home;
