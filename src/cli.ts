@@ -570,7 +570,7 @@ program
     if (g.seededFrom) console.log(`  seeded: copied a starting graph from ${g.seededFrom} (git worktree)`);
     if (deep) {
       const m = g.meaning;
-      console.log(`  meaning: ${m.computed} computed, ${m.cached} cached, ${m.reused} reused, ${m.stale} stale, ${m.pending} pending, ${m.routedFiles} routed out`);
+      console.log(`  meaning: ${m.computed} computed, ${m.cached} cached, ${m.reused} reused, ${m.reuseDeclined} reuse declined, ${m.stale} stale, ${m.pending} pending, ${m.routedFiles} routed out`);
     }
     console.log(`  → ${g.contextDir}`);
     // The activation event. Everything here is a bucket or a fixed label: repo

@@ -149,9 +149,10 @@ export interface DeepBuildRouteItem {
 /** Optional guarantees made by the caller for a deep-build routing request. */
 export interface DeepBuildRouteCapabilities {
   /**
-   * A `reuse` decision for a symbol is safe only when its supplied prior has
-   * either no crux or a crux whose exact code was found uniquely in the current
-   * node span. Its coordinates therefore point into the current file.
+   * A symbol prior either has no crux or carries an excerpt whose exact lines
+   * were found uniquely in the current node span. Its coordinates therefore
+   * point into the current file. This proves coordinates, not that the old
+   * summary or excerpt remains semantically relevant.
    */
   symbolMeaningReuse?: "exact-crux-remap";
 }
