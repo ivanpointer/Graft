@@ -83,8 +83,9 @@ test('machine stats attribute invocation savings only to correlated, observed ho
     host: 'codex', toolUseId: 'u5', kind: 'graft', invocationId: wrongDomainId!,
     metadataSource: 'host-payload', configSnapshotId: snapshot!,
   }, home);
-  await recordToolObservation({ host: 'cursor', toolUseId: 'source-1', kind: 'source' }, home);
-  await recordToolObservation({ host: 'cursor', toolUseId: 'source-1', kind: 'source' }, home);
+  await recordToolObservation({ host: 'cursor', sessionId: 's2', toolUseId: 'source-1', kind: 'source' }, home);
+  await recordToolObservation({ host: 'cursor', sessionId: 's2', toolUseId: 'source-1', kind: 'source' }, home);
+  await recordToolObservation({ host: 'cursor', sessionId: 's3', toolUseId: 'source-1', kind: 'source' }, home);
 
   const report = await readStatsReport({ home });
   assert.deepEqual(report.modelEfforts, [
@@ -93,7 +94,7 @@ test('machine stats attribute invocation savings only to correlated, observed ho
   ]);
   assert.equal(report.savedTokens, 1100, 'host observation savings are never added to invocation savings');
   const db = new DatabaseSync(statsPath(home), { readOnly: true });
-  assert.equal((db.prepare('SELECT COUNT(*) AS n FROM tool_observations').get() as { n: number }).n, 5);
+  assert.equal((db.prepare('SELECT COUNT(*) AS n FROM tool_observations').get() as { n: number }).n, 6);
   const columns = (db.prepare('PRAGMA table_info(tool_observations)').all() as Array<{ name: string }>).map((row) => row.name);
   assert.ok(!columns.some((column) => column.startsWith('observed_')), 'host dimensions live only in config_snapshots');
   db.close();

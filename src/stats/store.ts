@@ -306,8 +306,8 @@ function migration7(db: DatabaseSync): void {
     CREATE UNIQUE INDEX IF NOT EXISTS tool_observations_invocation_id
       ON tool_observations(invocation_id) WHERE invocation_id IS NOT NULL;
     CREATE UNIQUE INDEX IF NOT EXISTS tool_observations_host_tool_use
-      ON tool_observations(host, tool_use_id)
-      WHERE host IS NOT NULL AND tool_use_id IS NOT NULL;
+      ON tool_observations(host, session_id, tool_use_id)
+      WHERE host IS NOT NULL AND session_id IS NOT NULL AND tool_use_id IS NOT NULL;
   `);
 }
 
@@ -494,12 +494,14 @@ export async function recordHookRun(run: HookRun, home?: string): Promise<void> 
 }
 
 /** Persist a host-side read classification without duplicating invocation savings. */
-export async function recordToolObservation(observation: ToolObservation, home?: string): Promise<void> {
+export async function recordToolObservation(
+  observation: ToolObservation, home?: string,
+): Promise<'inserted' | 'duplicate' | 'failed'> {
   try {
     const metadataSource = observation.metadataSource === 'host-payload' || observation.metadataSource === 'host-transcript'
       ? observation.metadataSource : null;
-    await withDatabase(home, (db) => {
-      db.prepare(`
+    const changes = await withDatabase(home, (db) => {
+      const result = db.prepare(`
         INSERT OR IGNORE INTO tool_observations (
           id, occurred_at, repo_path, session_id, host, kind, saved_tokens, config_snapshot_id,
           invocation_id, turn_id, tool_use_id, metadata_source
@@ -511,8 +513,10 @@ export async function recordToolObservation(observation: ToolObservation, home?:
         cleanText(observation.invocationId, 64), cleanText(observation.turnId, 512), cleanText(observation.toolUseId, 512),
         metadataSource,
       );
+      return result.changes;
     });
-  } catch { /* observations are strictly best-effort */ }
+    return changes > 0 ? 'inserted' : 'duplicate';
+  } catch { return 'failed'; /* observations are strictly best-effort */ }
 }
 
 /** Persist a bounded JEV decision batch and its item-level actions atomically. */

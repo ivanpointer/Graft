@@ -50,20 +50,10 @@ function hostText(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() && value.length <= 512 ? value.trim() : undefined;
 }
 
-function currentClaudeModel(dir: string, sessionId: string): string | undefined {
-  return hostText((readSession(dir, sessionId) as { observedHostModel?: unknown }).observedHostModel);
-}
-
-function rememberClaudeModel(dir: string, sessionId: string, model: unknown): void {
-  const observedHostModel = hostText(model);
-  if (!observedHostModel) return;
-  writeSession(dir, sessionId, Object.assign(readSession(dir, sessionId), { observedHostModel }));
-}
-
-export function toolMetadata(input: any, host: 'codex' | 'claude-code' | 'cursor', dir: string, response: unknown): ObservedToolMetadata {
+export function toolMetadata(input: any, host: 'codex' | 'claude-code' | 'cursor', _dir: string, response: unknown): ObservedToolMetadata {
   const invocationId = invocationIdFromResponse(response);
   if (!invocationId) return {};
-  const model = host === 'claude-code' ? currentClaudeModel(dir, input?.session_id || 'default')
+  const model = host === 'claude-code' ? undefined
     : hostText(host === 'cursor' ? input?.model_id ?? input?.model : input?.model);
   const params = Array.isArray(input?.model_params) ? input.model_params : [];
   const cursorEffort = params.find((item: any) => item?.id === 'effort')?.value;
@@ -89,6 +79,11 @@ async function recordHostUse(
     await recordToolUse(dir, sessionId, { ...use, host: host as Parameters<typeof recordToolUse>[2]['host'] }, configSnapshotId);
     return;
   }
+  const observation = {
+    repo: dir, sessionId: sessionId || 'default', host, kind: 'graft' as const, savedTokens: use.savedTokens,
+    configSnapshotId, ...metadata,
+  };
+  if (await recordToolObservation(observation) === 'duplicate') return;
   const id = sessionId || 'default';
   const session = readSession(dir, id);
   session.graftReads = (session.graftReads ?? 0) + 1;
@@ -96,11 +91,6 @@ async function recordHostUse(
   session.turnUsedGraft = true;
   if (!session.host) Object.assign(session, { host });
   writeSession(dir, id, session);
-  const observation = {
-    repo: dir, sessionId: id, host, kind: 'graft' as const, savedTokens: use.savedTokens,
-    configSnapshotId, ...metadata,
-  };
-  await recordToolObservation(observation);
 }
 
 /** Prompts shorter than this never trigger retrieval — they are almost always
@@ -496,10 +486,14 @@ export async function main(event: string): Promise<void> {
   const isCursor = event.startsWith('cursor-');
   const host = isCursor ? 'cursor' : process.env.CODEX_SESSION_ID || input?.turn_id ? 'codex' : 'claude-code';
   const sessionId = isCursor ? cursorSessionId(input) : input?.session_id || process.env.CODEX_SESSION_ID || 'default';
-  if (host === 'claude-code' && event === 'session-start') rememberClaudeModel(dir, sessionId, input?.model);
-  if (host === 'claude-code' && event === 'post-model-switch') rememberClaudeModel(dir, sessionId, input?.to_model);
+  // Session model changes are useful history, but a one-turn fallback can serve
+  // a tool call without changing the session model. Do not attach that hint to
+  // an exact invocation as if it were the model that made the call.
   const configurationInput = host === 'claude-code' && event === 'tool-savings'
-    ? { model: currentClaudeModel(dir, sessionId), effort: input?.effort } : input;
+    ? { effort: input?.effort }
+    : host === 'claude-code' && event === 'post-model-switch'
+      ? { model: input?.to_model }
+      : input;
   const configSnapshotId = await recordHarnessConfiguration(host, configurationInput);
   const configuredEvent: Record<string, string> = {
     'session-start': 'SessionStart', prompt: 'UserPromptSubmit', 'post-edit': 'PostToolUse',

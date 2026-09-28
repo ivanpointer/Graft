@@ -9,6 +9,7 @@ import { runSync } from '../src/claude/sync-run.js';
 import { savingsLine } from '../src/context/savings.js';
 import { CI_ENV_VARS } from '../src/telemetry/gate.js';
 import { writeStats, emptyStats, acquireLock, resolveContextDir } from '../src/claude/state.js';
+import { readStatsReport, recordInvocation } from '../src/stats/store.js';
 
 test('underGraft detects edits inside graft/', () => {
   assert.equal(underGraft('/repo', '/repo/graft/x.md'), true);
@@ -514,7 +515,7 @@ test('host tool metadata is tied to a response marker and native per-call fields
     assert.deepEqual(toolMetadata({ session_id: 'claude-s', prompt_id: 'prompt-1', tool_use_id: 'tool-1', effort: { level: 'high' } },
       'claude-code', d, { content: [{ text: marker }] }), {
       invocationId: INVOCATION, turnId: 'prompt-1', toolUseId: 'tool-1',
-      model: 'claude-second', reasoningEffort: 'high', metadataSource: 'host-payload',
+      model: undefined, reasoningEffort: 'high', metadataSource: 'host-payload',
     });
     assert.deepEqual(toolMetadata({ model: 'gpt-live', turn_id: 'turn-1', tool_use_id: 'tool-2', model_reasoning_effort: 'max' },
       'codex', d, { stderr: marker }), {
@@ -531,6 +532,42 @@ test('host tool metadata is tied to a response marker and native per-call fields
     delete process.env.CLAUDE_PROJECT_DIR;
     if (codexSession === undefined) delete process.env.CODEX_SESSION_ID;
     else process.env.CODEX_SESSION_ID = codexSession;
+  }
+});
+
+test('Codex hook attributes one recorded invocation and ignores a replay', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'graft-codex-attribution-'));
+  const statsHome = mkdtempSync(join(tmpdir(), 'graft-codex-attribution-stats-'));
+  const previous = {
+    project: process.env.CLAUDE_PROJECT_DIR,
+    stats: process.env.GRAFT_STATS_HOME,
+    codex: process.env.CODEX_SESSION_ID,
+  };
+  process.env.CLAUDE_PROJECT_DIR = dir;
+  process.env.GRAFT_STATS_HOME = statsHome;
+  delete process.env.CODEX_SESSION_ID;
+  try {
+    const id = await recordInvocation({ command: 'graft_repo_map', surface: 'mcp', savedTokens: 500 }, statsHome);
+    assert.ok(id);
+    const input = JSON.stringify({
+      session_id: 'codex-s', turn_id: 'turn-1', tool_use_id: 'call-1', model: 'gpt-live',
+      tool_name: 'mcp__graft__graft_repo_map',
+      tool_response: { content: [{ type: 'text', text: `[graft] invocation_id=${id}\n[graft] tokens saved ≈ 500` }] },
+    });
+    await runWithStdin(input, () => main('tool-savings'));
+    await runWithStdin(input, () => main('tool-savings'));
+    assert.equal(readSession(dir, 'codex-s').graftReads, 1);
+    assert.equal(readSession(dir, 'codex-s').savedTokens, 500);
+    assert.deepEqual((await readStatsReport({ home: statsHome })).modelEfforts, [
+      { provider: 'unknown', model: 'gpt-live', reasoningEffort: 'unknown', calls: 1, savedTokens: 500 },
+    ]);
+  } finally {
+    if (previous.project === undefined) delete process.env.CLAUDE_PROJECT_DIR;
+    else process.env.CLAUDE_PROJECT_DIR = previous.project;
+    if (previous.stats === undefined) delete process.env.GRAFT_STATS_HOME;
+    else process.env.GRAFT_STATS_HOME = previous.stats;
+    if (previous.codex === undefined) delete process.env.CODEX_SESSION_ID;
+    else process.env.CODEX_SESSION_ID = previous.codex;
   }
 });
 

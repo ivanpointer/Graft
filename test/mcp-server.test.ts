@@ -71,7 +71,7 @@ test('initialize → tools/list → tools/call round-trip', async () => {
   const db = new DatabaseSync(statsPath(statsHome), { readOnly: true });
   const rows = db.prepare('SELECT id, command, surface, ok FROM invocations').all() as Array<{ id: string; command: string; surface: string; ok: number }>;
   db.close();
-  assert.deepEqual(rows, [{ id, command: 'graft_trace_calls', surface: 'mcp', ok: 0 }]);
+  assert.deepEqual(rows.map((row) => ({ ...row })), [{ id, command: 'graft_trace_calls', surface: 'mcp', ok: 0 }]);
 });
 
 test('successful MCP tool call keeps one savings footer and exposes its recorded ID', async () => {
@@ -96,7 +96,7 @@ test('successful MCP tool call keeps one savings footer and exposes its recorded
   const db = new DatabaseSync(statsPath(statsHome), { readOnly: true });
   const rows = db.prepare('SELECT id, command, surface, ok, saved_tokens FROM invocations').all() as Array<{ id: string; command: string; surface: string; ok: number; saved_tokens: number }>;
   db.close();
-  assert.deepEqual(rows, [{ id, command: 'graft_repo_map', surface: 'mcp', ok: 1, saved_tokens: sumSavingsFooters(text) }]);
+  assert.deepEqual(rows.map((row) => ({ ...row })), [{ id, command: 'graft_repo_map', surface: 'mcp', ok: 1, saved_tokens: sumSavingsFooters(text) }]);
 });
 
 const ALL_TOOLS = [
