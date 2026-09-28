@@ -144,15 +144,20 @@ export interface DeepBuildSourceWindow {
   code: string;
 }
 
-/**
- * A complete changed region, plus bounded unchanged context on each side.
- * Every changed line is present; callers omit the context rather than truncate
- * it when the changed region itself exceeds their disclosure budget.
- */
-export interface DeepBuildChangeContext {
-  kind: "complete-line-window-v1";
+/** One complete changed region, plus bounded unchanged context on each side. */
+export interface DeepBuildChangeHunk {
   previous: DeepBuildSourceWindow;
   current: DeepBuildSourceWindow;
+}
+
+/**
+ * Every changed line, split into bounded old/new hunks. Unchanged source
+ * between distant edits is deliberately omitted; each hunk retains nearby
+ * context and source-relative coordinates.
+ */
+export interface DeepBuildChangeContext {
+  kind: "complete-line-hunks-v1";
+  hunks: readonly DeepBuildChangeHunk[];
 }
 
 export interface DeepBuildRouteItem {
@@ -173,13 +178,13 @@ export interface DeepBuildRouteCapabilities {
    * previous and current source, plus bounded unchanged context. An absent
    * item context means that guarantee could not be made within the host limit.
    */
-  fileSummaryChangeContext?: "complete-line-window-v1";
+  fileSummaryChangeContext?: "complete-line-hunks-v1";
   /**
    * Changed symbol-meaning items may carry every changed line from the prior
    * and current symbol source. Windows are relative to the corresponding item
    * source, while any prior crux retains file-absolute coordinates.
    */
-  symbolMeaningChangeContext?: "complete-line-window-v1";
+  symbolMeaningChangeContext?: "complete-line-hunks-v1";
   /**
    * A symbol prior either has no crux or carries an excerpt whose exact lines
    * were found uniquely in the current node span. Its coordinates therefore

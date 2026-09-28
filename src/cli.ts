@@ -118,7 +118,7 @@ program
   .option("--model <id>", "model id for the LLM pass (env GRAFT_MODEL)")
   .option("--api-key <key>", "provider API key (env GRAFT_API_KEY)")
   .option("--base-url <url>", "OpenAI-compatible endpoint URL (env GRAFT_BASE_URL)")
-  .option("--hook <path>", "trusted ESM module exporting Graft component and decision hooks");
+  .option("--hook <path>", "trusted ESM module exporting Graft component and decision hooks (env GRAFT_HOOK)");
 
 interface GlobalOpts {
   dir?: string;
@@ -147,8 +147,11 @@ const engineFrom = (): Graft => new Graft(cliConfig());
 async function hookedConfigFor(repoRoot: string): Promise<EngineConfig> {
   const base = cliConfig();
   const explicit = program.opts<GlobalOpts>().hook;
+  const environment = process.env.GRAFT_HOOK?.trim();
   const stored = readBuildConfig(repoRoot)?.hooks;
-  const hook = explicit ?? (stored ? assertSafePersistedHook(repoRoot, stored) : undefined);
+  const hook = explicit
+    ?? (environment ? assertSafePersistedHook(repoRoot, environment) : undefined)
+    ?? (stored ? assertSafePersistedHook(repoRoot, stored) : undefined);
   if (!hook) return base;
   const configured = await applyHookModule(base, hook, repoRoot);
   if (explicit) patchBuildConfig(repoRoot, { hooks: explicit });

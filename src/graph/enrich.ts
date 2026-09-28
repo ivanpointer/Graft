@@ -220,7 +220,7 @@ export async function enrichGraph(
           capabilities: {
             symbolMeaningReuse: "exact-crux-remap",
             ...(priorFileSource !== undefined
-              ? { symbolMeaningChangeContext: "complete-line-window-v1" as const }
+              ? { symbolMeaningChangeContext: "complete-line-hunks-v1" as const }
               : {}),
           },
           items: refs.map((ref, index) => {
