@@ -243,7 +243,7 @@ export async function buildContext(dir: string, opts: BuildOptions): Promise<Bui
             ...(change ? { change } : {}),
           }],
           ...(priorSource !== undefined
-            ? { capabilities: { fileSummaryChangeContext: "complete-line-window-v1" as const } }
+            ? { capabilities: { fileSummaryChangeContext: "complete-line-hunks-v1" as const } }
             : {}),
         });
         if (Array.isArray(raw)) {

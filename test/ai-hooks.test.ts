@@ -117,3 +117,33 @@ test("the CLI runs a fully hooked deep build without an API key and persists the
   assert.match(stdout, /meaning: \d+ computed/);
   assert.equal(readBuildConfig(repo)?.hooks, hook);
 });
+
+test("GRAFT_HOOK safely enables an external hook without persisting it", () => {
+  const repo = tmpRepo("hook-cli-env");
+  writeFileSync(join(repo, "main.ts"), "export function run() { return 1; }\n");
+  const hookDir = fresh("graft-hook-cli-env-module-");
+  const hook = join(hookDir, "hook.mjs");
+  writeFileSync(
+    hook,
+    `export function summarizer() { return { async summarize() { return "custom file summary"; } }; }
+     export function synthesizer() { return { async synthesize() { return []; } }; }
+     export function cruxSummarizer() { return { async describeFile(input) { return input.nodes.map((node) => ({ id: node.id, summary: "custom symbol", crux_start: 0, crux_end: 0 })); } }; }\n`,
+  );
+  const env = {
+    ...process.env,
+    CI: "1",
+    GRAFT_API_KEY: "",
+    OPENROUTER_API_KEY: "",
+    ORCAROUTER_API_KEY: "",
+    GRAFT_HOOK: hook,
+  };
+
+  const stdout = execFileSync(
+    process.execPath,
+    ["--import", "tsx", "src/cli.ts", "build", repo, "--deep", "-j", "1"],
+    { cwd: process.cwd(), env, encoding: "utf8" },
+  );
+
+  assert.match(stdout, /meaning: \d+ computed/);
+  assert.equal(readBuildConfig(repo)?.hooks, undefined);
+});

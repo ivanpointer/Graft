@@ -236,12 +236,14 @@ test("deep-build router receives complete bounded symbol changes from a hash-mat
       router: { async route(input) {
         assert.deepEqual(input.capabilities, {
           symbolMeaningReuse: "exact-crux-remap",
-          symbolMeaningChangeContext: "complete-line-window-v1",
+          symbolMeaningChangeContext: "complete-line-hunks-v1",
         });
         assert.deepEqual(input.items[0].change, {
-          kind: "complete-line-window-v1",
-          previous: { startLine: 1, lineCount: 4, code: previousSource.trimEnd() },
-          current: { startLine: 1, lineCount: 4, code: source.trimEnd() },
+          kind: "complete-line-hunks-v1",
+          hunks: [{
+            previous: { startLine: 1, lineCount: 4, code: previousSource.trimEnd() },
+            current: { startLine: 1, lineCount: 4, code: source.trimEnd() },
+          }],
         });
         assert.deepEqual(input.items[0].prior?.crux, { code: "  return stable();", span: "L3-L3" });
         return [{ key: "s0", action: "reuse" }];
@@ -309,12 +311,12 @@ test("graph builds persist exact meaning sources for the next bounded symbol rou
   let sawFunctionDelta = false;
   const result = await new Graft({
     deepBuildRouter: { async route(input) {
-      assert.equal(input.capabilities?.symbolMeaningChangeContext, "complete-line-window-v1");
+      assert.equal(input.capabilities?.symbolMeaningChangeContext, "complete-line-hunks-v1");
       for (const item of input.items) {
         if (!item.source.startsWith("export function keep")) continue;
         sawFunctionDelta = true;
-        assert.match(item.change?.previous.code ?? "", /old explanation/);
-        assert.match(item.change?.current.code ?? "", /clearer explanation/);
+        assert.match(item.change?.hunks[0]?.previous.code ?? "", /old explanation/);
+        assert.match(item.change?.hunks[0]?.current.code ?? "", /clearer explanation/);
       }
       return input.items.map((item) => ({ key: item.key, action: "reuse" }));
     } },
@@ -522,12 +524,14 @@ test("deep-build router can reuse a prior file summary after its source changes"
       assert.equal(input.phase, "file-summary");
       assert.equal(input.items[0].prior?.value, "stable meaning");
       assert.deepEqual(input.capabilities, {
-        fileSummaryChangeContext: "complete-line-window-v1",
+        fileSummaryChangeContext: "complete-line-hunks-v1",
       });
       assert.deepEqual(input.items[0].change, {
-        kind: "complete-line-window-v1",
-        previous: { startLine: 1, lineCount: 1, code: "export const value = 1;" },
-        current: { startLine: 1, lineCount: 1, code: "export const value = 2;" },
+        kind: "complete-line-hunks-v1",
+        hunks: [{
+          previous: { startLine: 1, lineCount: 1, code: "export const value = 1;" },
+          current: { startLine: 1, lineCount: 1, code: "export const value = 2;" },
+        }],
       });
       return [{ key: input.items[0].key, action: "reuse" }];
     } },
@@ -537,7 +541,7 @@ test("deep-build router can reuse a prior file summary after its source changes"
   assert.equal(result.reused, 1);
 });
 
-test("file-summary router withholds an incomplete change window", async () => {
+test("file-summary router withholds incomplete change hunks", async () => {
   const repo = tmpRepo("decision-route-summary-large-change");
   const file = join(repo, "main.ts");
   writeFileSync(file, `export const payload = ${JSON.stringify("a".repeat(13_000))};\n`);
@@ -554,7 +558,7 @@ test("file-summary router withholds an incomplete change window", async () => {
     deepBuildRouter: { async route(input) {
       assert.equal(input.items[0].change, undefined);
       assert.deepEqual(input.capabilities, {
-        fileSummaryChangeContext: "complete-line-window-v1",
+        fileSummaryChangeContext: "complete-line-hunks-v1",
       });
       return [{ key: input.items[0].key, action: "process" }];
     } },

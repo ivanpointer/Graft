@@ -628,10 +628,20 @@ not that a prior summary remains semantically relevant. When coordinate proof is
 unavailable, graft withholds the prior and ignores `reuse`. This lets a bounded
 semantic backend save paid work without generating summaries or graph data itself.
 
+Changed items may also advertise
+`fileSummaryChangeContext` or `symbolMeaningChangeContext` as
+`"complete-line-hunks-v1"`. Their context contains ordered old/new line windows
+covering every changed line while omitting distant unchanged regions. Graft
+withholds the context when it cannot fit the bounded payload, so hooks must fall
+back to `process` when the capability or evidence is absent.
+
 The selected path is recorded as `hooks` in `.graft/config.json`. A later build
 or query auto-loads it only when it is an absolute path outside the indexed repository.
 Repo-local code always requires an explicit `--hook` on that invocation: merely
 cloning a repository must never execute a module named by repository-local data.
+For a machine-wide default, set `GRAFT_HOOK` to an absolute path outside indexed
+repositories. An explicit `--hook` takes precedence, and the environment-selected
+path is never written into a repository's config.
 
 ---
 
