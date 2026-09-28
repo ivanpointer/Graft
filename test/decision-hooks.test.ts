@@ -403,10 +403,43 @@ test("deep-build router can reuse a prior file summary after its source changes"
     deepBuildRouter: { async route(input) {
       assert.equal(input.phase, "file-summary");
       assert.equal(input.items[0].prior?.value, "stable meaning");
+      assert.deepEqual(input.capabilities, {
+        fileSummaryChangeContext: "complete-line-window-v1",
+      });
+      assert.deepEqual(input.items[0].change, {
+        kind: "complete-line-window-v1",
+        previous: { startLine: 1, lineCount: 1, code: "export const value = 1;" },
+        current: { startLine: 1, lineCount: 1, code: "export const value = 2;" },
+      });
       return [{ key: input.items[0].key, action: "reuse" }];
     } },
   });
   const result = await second.init(repo);
   assert.equal(calls, 0);
   assert.equal(result.reused, 1);
+});
+
+test("file-summary router withholds an incomplete change window", async () => {
+  const repo = tmpRepo("decision-route-summary-large-change");
+  const file = join(repo, "main.ts");
+  writeFileSync(file, `export const payload = ${JSON.stringify("a".repeat(13_000))};\n`);
+  await new Graft({
+    summarizer: { async summarize() { return "old payload"; } },
+    synthesizer: { async synthesize() { return []; } },
+  }).init(repo);
+
+  writeFileSync(file, `export const payload = ${JSON.stringify("b".repeat(13_000))};\n`);
+  let summarized = 0;
+  const result = await new Graft({
+    summarizer: { async summarize() { summarized++; return "new payload"; } },
+    synthesizer: { async synthesize() { return []; } },
+    deepBuildRouter: { async route(input) {
+      assert.equal(input.items[0].change, undefined);
+      assert.equal(input.capabilities, undefined);
+      return [{ key: input.items[0].key, action: "process" }];
+    } },
+  }).init(repo);
+
+  assert.equal(summarized, 1);
+  assert.equal(result.reused, 0);
 });

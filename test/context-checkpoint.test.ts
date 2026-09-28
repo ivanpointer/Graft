@@ -75,6 +75,13 @@ test("a rerun re-summarizes nothing — resume is $0 for unchanged files", async
     assert.equal(first.summarized, 4);
     assert.equal(first.cached, 0);
 
+    // Simulate a cache written before source snapshots were introduced.
+    const legacy = JSON.parse(readFileSync(cachePath(dir), "utf8")) as {
+      summaries: Record<string, { source?: string }>;
+    };
+    for (const entry of Object.values(legacy.summaries)) delete entry.source;
+    writeFileSync(cachePath(dir), JSON.stringify(legacy));
+
     let called = false;
     const summarizer: Summarizer = {
       async summarize(code: string): Promise<string> {
@@ -90,6 +97,10 @@ test("a rerun re-summarizes nothing — resume is $0 for unchanged files", async
     assert.equal(called, false, "no file should be re-summarized on an unchanged rerun");
     assert.equal(second.summarized, 0);
     assert.equal(second.cached, 4);
+    const cache = JSON.parse(readFileSync(cachePath(dir), "utf8")) as {
+      summaries: Record<string, { source?: string }>;
+    };
+    assert.ok(Object.values(cache.summaries).every((entry) => typeof entry.source === "string"));
   } finally {
     rmDir(dir);
   }
