@@ -4,7 +4,7 @@ const fs = require('fs');
 const { pathToFileURL } = require('url');
 const { execFileSync } = require('child_process');
 const dir = process.env.CLAUDE_PROJECT_DIR || process.cwd();
-const BAKED = "/nix/store/xfmxac81il48by61wmmndnhwp61gyiy9-nanonets-graft-0.20.0-stats-4bd7747/lib/node_modules/@nanonets/graft/dist/claude";
+const BAKED = "/nix/store/m1b36rhw2266v2whj72j00wszshps02z-nanonets-graft-0.20.0-stats-64d87c8/lib/node_modules/@nanonets/graft/dist/claude";
 
 // The dist/claude dir of @nanonets/graft resolved from a base whose node_modules is searched.
 function fromPkg(base) {
@@ -20,6 +20,16 @@ function globalRoot() {
     const root = execFileSync('npm', ['root', '-g'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], shell: process.platform === 'win32' }).trim();
     return root || null;
   } catch { return null; /* npm unavailable */ }
+}
+
+// Nix's system profile exposes executables but does not merge arbitrary share/
+// subdirectories. This tiny companion command prints the package-owned Claude
+// asset directory through the stable /run/current-system profile.
+function nixClaudeDir() {
+  try {
+    const dir = execFileSync('/run/current-system/sw/bin/graft-claude-dir', [], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    return dir || null;
+  } catch { return null; }
 }
 
 // The version of the package a dist/claude dir belongs to, or null if unreadable.
@@ -54,6 +64,11 @@ function best(dirs, name) {
 }
 
 function entry(name) {
+  // Nix rotates store paths on every package build. Its current-system locator
+  // is stable and must win over a still-present, older baked or npm-global package.
+  const nixSystem = nixClaudeDir();
+  if (nixSystem && fs.existsSync(path.join(nixSystem, name))) return path.join(nixSystem, name);
+
   // Cheap candidates first, and only shell out to npm when every one of them misses.
   const cheap = [BAKED, fromPkg(dir), fromPkg(path.join(path.dirname(process.execPath), '..', 'lib'))];
   const hit = best(cheap, name);
