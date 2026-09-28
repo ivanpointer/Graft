@@ -62,6 +62,7 @@ import { latestSession, formatSessionStats, sessionInputRate } from "./claude/se
 import { setInputRate } from "./context/savings.js";
 import { beginInvocation, setInvocationRepo, takeInvocation } from "./stats/current.js";
 import { formatStatsReport, readStatsReport, recordInvocation } from "./stats/store.js";
+import { recordGraftConfiguration } from "./stats/config.js";
 import { formatUpdateNudge, maybeRefreshInBackground, readUpdateCache, refreshUpdateCache, wiredHostIds, writeStamp } from "./upkeep.js";
 import {
   errorCode,
@@ -118,6 +119,7 @@ program
   .option("--dir <path>", "context graph directory (default: <repo>/graft)")
   .option("--provider <name>", "LLM wire format: openai | anthropic | litellm | orcarouter (env GRAFT_PROVIDER)")
   .option("--model <id>", "model id for the LLM pass (env GRAFT_MODEL)")
+  .option("--reasoning-effort <level>", "reasoning level for OpenAI-compatible models (env GRAFT_REASONING_EFFORT)")
   .option("--api-key <key>", "provider API key (env GRAFT_API_KEY)")
   .option("--base-url <url>", "OpenAI-compatible endpoint URL (env GRAFT_BASE_URL)");
 
@@ -125,6 +127,7 @@ interface GlobalOpts {
   dir?: string;
   provider?: string;
   model?: string;
+  reasoningEffort?: string;
   apiKey?: string;
   baseUrl?: string;
 }
@@ -136,6 +139,7 @@ function cliConfig(): EngineConfig {
     contextDir: o.dir,
     provider: o.provider as ProviderKind | undefined,
     model: o.model,
+    reasoningEffort: o.reasoningEffort,
     apiKey: o.apiKey,
     baseUrl: o.baseUrl,
   };
@@ -262,6 +266,7 @@ program.hook("postAction", async (_parent, action) => {
   // change merely because it was viewed. Internal maintenance commands are not
   // user work either.
   if (name === "stats" || name.startsWith("_")) return;
+  const configSnapshotId = await recordGraftConfiguration(cliConfig());
   await recordInvocation({
     command: name,
     surface: "cli",
@@ -273,6 +278,7 @@ program.hook("postAction", async (_parent, action) => {
     baselineTokens: observation?.baselineTokens,
     outputTokens: observation?.outputTokens,
     sourceFiles: observation?.sourceFiles,
+    configSnapshotId: configSnapshotId ?? undefined,
   });
 });
 

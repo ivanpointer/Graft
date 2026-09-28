@@ -20,6 +20,8 @@ const JSON_TOOL = "emit_json";
 export interface OpenAIChatModelOptions {
   apiKey: string;
   model: string;
+  /** Optional server-supported reasoning level, such as `low` or `high`. */
+  reasoningEffort?: string;
   baseUrl?: string;
   /** Stable manifest label; defaults to `openai:<model>`. */
   label?: string;
@@ -134,9 +136,11 @@ export class OpenAIChatModel implements ChatModel {
   readonly label: string;
   private client: OpenAI;
   private model: string;
+  private reasoningEffort?: string;
 
   constructor(opts: OpenAIChatModelOptions) {
     this.model = opts.model;
+    this.reasoningEffort = opts.reasoningEffort;
     this.label = opts.label ?? `${PROVIDER}:${opts.model}`;
     this.client =
       opts.client ??
@@ -152,6 +156,7 @@ export class OpenAIChatModel implements ChatModel {
     const messages = req.messages.map(toChatMessage);
     const tools = req.tools ? req.tools.map(toChatTool) : undefined;
     const params: ChatParams = { model: this.model, messages };
+    if (this.reasoningEffort) params.reasoning_effort = this.reasoningEffort as ChatParams['reasoning_effort'];
     if (req.temperature !== undefined) params.temperature = req.temperature;
     if (req.maxTokens !== undefined) params.max_tokens = req.maxTokens;
 

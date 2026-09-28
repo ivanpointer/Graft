@@ -14,6 +14,7 @@ import { hasSavingsTally, lastAssistantTurn, lastTurnBilling } from './tally.js'
 import { scopeOf, scopesOfGraph } from '../graph/scopes.js';
 import { classifyToolUse, isMcpToolName, isGraftMcpTool, parseSavings, recordToolUse, type ToolKind } from './session-metrics.js';
 import { recordHookRun } from '../stats/store.js';
+import { recordHarnessConfiguration } from '../stats/config.js';
 
 /** Prompts shorter than this never trigger retrieval — they are almost always
  * conversational ("yes go ahead", "thanks") and the coverage gate can't judge
@@ -251,9 +252,9 @@ export function lastFileScopeHint(dir: string, lastFile: string | null | undefin
  * Write/Edit/unrelated-Bash majority: nothing to classify and no footer means
  * nothing is written.
  */
-async function handleToolUse(input: any, dir: string): Promise<void> {
+async function handleToolUse(input: any, dir: string, configSnapshotId?: string): Promise<void> {
   await recordToolUse(dir, input?.session_id || 'default',
-    { ...classifyAndScore(input?.tool_name, input?.tool_input?.command, () => input?.tool_response ?? input), host: 'claude-code' });
+    { ...classifyAndScore(input?.tool_name, input?.tool_input?.command, () => input?.tool_response ?? input), host: 'claude-code' }, configSnapshotId);
 }
 
 /**
@@ -289,12 +290,12 @@ function classifyAndScore(
  * (`graft_find_code`) tool-name shapes, so the guard — not just the installed
  * matcher — is what prevents the double count.
  */
-async function handleCursorPostTool(input: any, dir: string): Promise<void> {
+async function handleCursorPostTool(input: any, dir: string, configSnapshotId?: string): Promise<void> {
   const toolName = String(input?.tool_name ?? '');
   if (isMcpToolName(toolName) || isGraftMcpTool(toolName)) return; // handled by handleCursorMcp
   const command = input?.tool_input?.command ?? input?.tool_input?.cmd;
   await recordToolUse(dir, cursorSessionId(input),
-    { ...classifyAndScore(toolName, command, () => input?.tool_output ?? input?.tool_response ?? input), host: 'cursor' });
+    { ...classifyAndScore(toolName, command, () => input?.tool_output ?? input?.tool_response ?? input), host: 'cursor' }, configSnapshotId);
 }
 
 /**
@@ -302,11 +303,11 @@ async function handleCursorPostTool(input: any, dir: string): Promise<void> {
  * recognised by its name and its savings read out of `result_json`. This is the
  * one place graft MCP calls are counted for Cursor.
  */
-async function handleCursorMcp(input: any, dir: string): Promise<void> {
+async function handleCursorMcp(input: any, dir: string, configSnapshotId?: string): Promise<void> {
   const toolName = String(input?.tool_name ?? '');
   if (!isGraftMcpTool(toolName)) return;
   const savedTokens = parseSavings(JSON.stringify(input?.result_json ?? input?.result ?? input ?? ''));
-  await recordToolUse(dir, cursorSessionId(input), { kind: 'graft', savedTokens, host: 'cursor' });
+  await recordToolUse(dir, cursorSessionId(input), { kind: 'graft', savedTokens, host: 'cursor' }, configSnapshotId);
 }
 
 /** Cursor keys a chat by `conversation_id` (its `session_id` equivalent). */
@@ -400,6 +401,7 @@ export async function main(event: string): Promise<void> {
   const isCursor = event.startsWith('cursor-');
   const host = isCursor ? 'cursor' : process.env.CODEX_SESSION_ID ? 'codex' : 'claude-code';
   const sessionId = isCursor ? cursorSessionId(input) : input?.session_id || process.env.CODEX_SESSION_ID || 'default';
+  const configSnapshotId = await recordHarnessConfiguration(host, input);
   const configuredEvent: Record<string, string> = {
     'session-start': 'SessionStart', prompt: 'UserPromptSubmit', 'post-edit': 'PostToolUse',
     'tool-savings': 'PostToolUse', stop: 'Stop', 'post-edit-sync': 'PostToolUse',
@@ -429,11 +431,11 @@ export async function main(event: string): Promise<void> {
 
   if (event === 'post-edit') { await handlePostEdit(input, dir); return; }
 
-  if (event === 'tool-savings') { await handleToolUse(input, dir); return; }
+  if (event === 'tool-savings') { await handleToolUse(input, dir, configSnapshotId ?? undefined); return; }
 
-  if (event === 'cursor-post-tool') { await handleCursorPostTool(input, dir); return; }
+  if (event === 'cursor-post-tool') { await handleCursorPostTool(input, dir, configSnapshotId ?? undefined); return; }
 
-  if (event === 'cursor-mcp') { await handleCursorMcp(input, dir); return; }
+  if (event === 'cursor-mcp') { await handleCursorMcp(input, dir, configSnapshotId ?? undefined); return; }
 
   // Cursor closes a chat: force-close THIS conversation into a bucketed
   // `session_summary` now (its file's mtime is fresh, so the idle sweep would
@@ -478,6 +480,7 @@ export async function main(event: string): Promise<void> {
       repo: dir, sessionId, host, event, outcome, durationMs: Date.now() - startedAt,
       timeoutMs: configuredEvent[event] ? installedHookTimeout(dir, configuredEvent[event]) ?? undefined : undefined,
       errorCode: outcome === 'error' ? 'hook-error' : undefined,
+      configSnapshotId: configSnapshotId ?? undefined,
     });
   }
 }

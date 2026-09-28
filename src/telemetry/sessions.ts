@@ -28,6 +28,7 @@ import { countBucket, savedTokensBucket, type AgentHost } from './contract.js';
 import { track } from './track.js';
 import { telemetryOn } from './gate.js';
 import { recordSessionRollup } from '../stats/store.js';
+import { recordHarnessConfiguration } from '../stats/config.js';
 
 /** Untouched for this long and the session is treated as over. */
 export const SESSION_IDLE_MS = 2 * 60 * 60 * 1000;
@@ -57,12 +58,17 @@ export function summarizeSession(
     // The machine-local warehouse is independent of anonymous telemetry. An
     // upsert also makes a resumed session's final state authoritative without
     // creating a duplicate rollup.
-    void recordSessionRollup({
-      repo, sessionId: id, host: s.host ?? host,
-      graftReads: s.graftReads ?? 0, sourceReads: s.sourceReads ?? 0, savedTokens: s.savedTokens ?? 0,
-      graftTurns: s.graftTurns, reportedTurns: s.reportedTurns,
-      inputCostMicros: s.inputCostMicros, inputTokensBilled: s.inputTokensBilled,
-    }, home);
+    void (async () => {
+      const effectiveHost = s.host ?? host;
+      const configSnapshotId = await recordHarnessConfiguration(effectiveHost, undefined, home, env);
+      await recordSessionRollup({
+        repo, sessionId: id, host: effectiveHost,
+        graftReads: s.graftReads ?? 0, sourceReads: s.sourceReads ?? 0, savedTokens: s.savedTokens ?? 0,
+        graftTurns: s.graftTurns, reportedTurns: s.reportedTurns,
+        inputCostMicros: s.inputCostMicros, inputTokensBilled: s.inputTokensBilled,
+        configSnapshotId: configSnapshotId ?? undefined,
+      }, home);
+    })();
     if (!telemetryOn(home, env)) return 0;
     if (s.summarized) return 0;
 

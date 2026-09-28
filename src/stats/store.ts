@@ -33,7 +33,7 @@ export interface Invocation {
 }
 
 /** The latest local schema revision. Migrations are additive and idempotent. */
-export const STATS_SCHEMA_VERSION = 5;
+export const STATS_SCHEMA_VERSION = 6;
 
 export interface ConfigurationSnapshot {
   /** `graft`, `harness`, or `jev`; keeps independent setting namespaces distinct. */
@@ -41,6 +41,13 @@ export interface ConfigurationSnapshot {
   schemaVersion: number;
   /** Deliberately declared safe settings only — never an environment dump or secret. */
   settings: Record<string, unknown>;
+  /** Typed, indexed analytics dimensions; settings remains the complete provenance record. */
+  dimensions?: {
+    /** Graft's own LLM configuration, if this operation uses one. */
+    provider?: string; model?: string; reasoningEffort?: string;
+    /** The coding harness whose context consumption the savings estimate targets. */
+    harness?: { host?: string; provider?: string; model?: string; reasoningEffort?: string };
+  };
 }
 
 export interface HookRun {
@@ -126,6 +133,8 @@ export interface StatsReport {
   firstSeen: string | null;
   lastSeen: string | null;
   commands: Array<{ command: string; calls: number; savedTokens: number }>;
+  /** Token-savings cohorts by the immutable effective configuration dimension. */
+  modelEfforts: Array<{ provider: string; model: string; reasoningEffort: string; calls: number; savedTokens: number }>;
 }
 
 export function statsPath(home: string = process.env.GRAFT_STATS_HOME ?? homedir()): string {
@@ -183,6 +192,9 @@ function migration2(db: DatabaseSync): void {
       domain TEXT NOT NULL,
       schema_version INTEGER NOT NULL,
       settings_json TEXT NOT NULL,
+      provider TEXT,
+      model TEXT,
+      reasoning_effort TEXT,
       first_seen_at TEXT NOT NULL,
       last_seen_at TEXT NOT NULL
     );
@@ -244,6 +256,38 @@ function migration5(db: DatabaseSync): void {
   `);
 }
 
+/** Promote the frequently-sliced LLM attributes from provenance JSON. */
+function migration6(db: DatabaseSync): void {
+  addColumn(db, 'config_snapshots', 'provider', 'TEXT');
+  addColumn(db, 'config_snapshots', 'model', 'TEXT');
+  addColumn(db, 'config_snapshots', 'reasoning_effort', 'TEXT');
+  addColumn(db, 'config_snapshots', 'harness_host', 'TEXT');
+  addColumn(db, 'config_snapshots', 'harness_provider', 'TEXT');
+  addColumn(db, 'config_snapshots', 'harness_model', 'TEXT');
+  addColumn(db, 'config_snapshots', 'harness_reasoning_effort', 'TEXT');
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS config_snapshots_provider_model_effort ON config_snapshots(provider, model, reasoning_effort);
+    CREATE INDEX IF NOT EXISTS config_snapshots_harness_model_effort
+      ON config_snapshots(harness_host, harness_provider, harness_model, harness_reasoning_effort);
+  `);
+  const rows = db.prepare(`
+    SELECT id, settings_json FROM config_snapshots
+    WHERE domain = 'graft' AND (provider IS NULL OR model IS NULL OR reasoning_effort IS NULL)
+  `).all() as Array<{ id: string; settings_json: string }>;
+  const update = db.prepare('UPDATE config_snapshots SET provider = ?, model = ?, reasoning_effort = ? WHERE id = ?');
+  for (const row of rows) {
+    try {
+      const settings = JSON.parse(row.settings_json) as Record<string, unknown>;
+      update.run(
+        cleanText(typeof settings.provider === 'string' ? settings.provider : undefined, 96),
+        cleanText(typeof settings.model === 'string' ? settings.model : undefined, 256),
+        cleanText(typeof settings.reasoningEffort === 'string' ? settings.reasoningEffort : undefined, 96),
+        row.id,
+      );
+    } catch { /* retain unreadable legacy snapshots as an unknown cohort */ }
+  }
+}
+
 interface MigrationContext { db: DatabaseSync; }
 
 /** Umzug storage backed by the same local SQLite database we are migrating. */
@@ -266,7 +310,7 @@ class SqliteMigrationStorage implements UmzugStorage<MigrationContext> {
   }
 }
 
-const MIGRATIONS = [migration1, migration2, migration3, migration4, migration5].map((up, index) => ({
+const MIGRATIONS = [migration1, migration2, migration3, migration4, migration5, migration6].map((up, index) => ({
   name: `${String(index + 1).padStart(3, '0')}-stats-schema`,
   up: async ({ context }: MigrationParams<MigrationContext>) => {
     context.db.exec('BEGIN IMMEDIATE');
@@ -383,10 +427,19 @@ export async function recordConfigurationSnapshot(snapshot: ConfigurationSnapsho
     const now = new Date().toISOString();
     await withDatabase(home, (db) => {
       db.prepare(`
-        INSERT INTO config_snapshots (id, domain, schema_version, settings_json, first_seen_at, last_seen_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO config_snapshots (
+          id, domain, schema_version, settings_json, provider, model, reasoning_effort,
+          harness_host, harness_provider, harness_model, harness_reasoning_effort, first_seen_at, last_seen_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET last_seen_at = excluded.last_seen_at
-      `).run(id, domain, snapshot.schemaVersion, settings, now, now);
+      `).run(
+        id, domain, snapshot.schemaVersion, settings,
+        cleanText(snapshot.dimensions?.provider, 96), cleanText(snapshot.dimensions?.model, 256),
+        cleanText(snapshot.dimensions?.reasoningEffort, 96),
+        cleanText(snapshot.dimensions?.harness?.host, 96), cleanText(snapshot.dimensions?.harness?.provider, 96),
+        cleanText(snapshot.dimensions?.harness?.model, 256), cleanText(snapshot.dimensions?.harness?.reasoningEffort, 96),
+        now, now,
+      );
     });
     return id;
   } catch { return null; }
@@ -502,7 +555,7 @@ export async function recordSessionRollup(rollup: SessionRollup, home?: string):
 export async function readStatsReport(opts: { sinceDays?: number; home?: string } = {}): Promise<StatsReport> {
   const empty: StatsReport = {
     calls: 0, successfulCalls: 0, repos: 0, sessions: 0, savedTokens: 0, avgSavedTokens: 0,
-    firstSeen: null, lastSeen: null, commands: [],
+    firstSeen: null, lastSeen: null, commands: [], modelEfforts: [],
   };
   try {
     return await withDatabase(opts.home, (db) => {
@@ -523,6 +576,20 @@ export async function readStatsReport(opts: { sinceDays?: number; home?: string 
         FROM invocations ${where}
         GROUP BY command ORDER BY savedTokens DESC, calls DESC, command ASC LIMIT 12
       `).all(...args) as Array<Record<string, unknown>>;
+      const dimensionWhere = since ? 'WHERE i.occurred_at >= ?' : '';
+      const dimensions = db.prepare(`
+        SELECT COALESCE(NULLIF(c.harness_provider, ''), 'unknown') AS provider,
+               COALESCE(NULLIF(c.harness_model, ''), 'unknown') AS model,
+               COALESCE(NULLIF(c.harness_reasoning_effort, ''), 'unknown') AS reasoningEffort,
+               COUNT(*) AS calls, COALESCE(SUM(i.saved_tokens), 0) AS savedTokens
+        FROM invocations i
+        LEFT JOIN config_snapshots c ON c.id = i.config_snapshot_id AND c.domain = 'graft'
+        ${dimensionWhere}
+        GROUP BY
+          COALESCE(NULLIF(c.harness_provider, ''), 'unknown'),
+          COALESCE(NULLIF(c.harness_model, ''), 'unknown'),
+          COALESCE(NULLIF(c.harness_reasoning_effort, ''), 'unknown')
+      `).all(...args) as Array<Record<string, unknown>>;
       const calls = Number(totals.calls ?? 0);
       const savedTokens = Number(totals.savedTokens ?? 0);
       return {
@@ -537,6 +604,16 @@ export async function readStatsReport(opts: { sinceDays?: number; home?: string 
         commands: commands.map((row) => ({
           command: String(row.command), calls: Number(row.calls), savedTokens: Number(row.savedTokens),
         })),
+        modelEfforts: dimensions.map((row) => {
+          const text = (value: unknown, fallback: string) =>
+            typeof value === 'string' && value.length > 0 ? value.slice(0, 96) : fallback;
+          return {
+            provider: text(row.provider, 'unknown'),
+            model: text(row.model, 'unknown'),
+            reasoningEffort: text(row.reasoningEffort, 'unknown'),
+            calls: Number(row.calls), savedTokens: Number(row.savedTokens),
+          };
+        }).sort((a, b) => b.savedTokens - a.savedTokens || b.calls - a.calls || a.model.localeCompare(b.model)),
       };
     });
   } catch {
@@ -560,6 +637,12 @@ export function formatStatsReport(report: StatsReport): string {
     lines.push('  by command:');
     for (const row of report.commands) {
       lines.push(`    ${row.command.padEnd(12)} ${String(row.calls).padStart(5)} calls  ~${row.savedTokens.toLocaleString()} saved`);
+    }
+  }
+  if (report.modelEfforts.length) {
+    lines.push('  by model / reasoning effort:');
+    for (const row of report.modelEfforts.slice(0, 12)) {
+      lines.push(`    ${row.provider}/${row.model} (${row.reasoningEffort})  ${String(row.calls).padStart(5)} calls  ~${row.savedTokens.toLocaleString()} saved`);
     }
   }
   return lines.join('\n');

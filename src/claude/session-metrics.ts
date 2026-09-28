@@ -126,7 +126,7 @@ export interface ToolUse {
  * undercount by one, never corruption thanks to the atomic write), and a lock
  * here would contend with the build lock these hooks also touch.
  */
-export async function recordToolUse(dir: string, sessionId: string, use: ToolUse): Promise<void> {
+export async function recordToolUse(dir: string, sessionId: string, use: ToolUse, configSnapshotId?: string): Promise<void> {
   const saved = use.savedTokens ?? 0;
   const kind = use.kind ?? (saved > 0 ? 'graft' : null);
   if (!kind) return;
@@ -145,7 +145,7 @@ export async function recordToolUse(dir: string, sessionId: string, use: ToolUse
   // The session file remains the live operational state; this append-only fact
   // is the machine-wide adoption record. It deliberately does not add to the
   // authoritative CLI/MCP saved-token total in `invocations`.
-  await recordToolObservation({ repo: dir, sessionId: id, host: use.host, kind, savedTokens: saved });
+  await recordToolObservation({ repo: dir, sessionId: id, host: use.host, kind, savedTokens: saved, configSnapshotId });
 }
 
 export interface SessionSummary extends SessionState {

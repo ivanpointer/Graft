@@ -16,6 +16,7 @@ import {
   recordToolObservation,
   statsPath,
 } from '../src/stats/store.js';
+import { recordGraftConfiguration } from '../src/stats/config.js';
 
 function freshHome(): string { return mkdtempSync(join(tmpdir(), 'graft-stats-')); }
 
@@ -40,6 +41,22 @@ test('machine stats retain exact local call, repo, and savings totals', async ()
 
 test('machine stats report a useful empty state', async () => {
   assert.equal(formatStatsReport(await readStatsReport({ home: freshHome() })), 'graft machine stats: no recorded calls yet.');
+});
+
+test('machine stats group saved tokens by immutable model and reasoning-effort configuration', async () => {
+  const home = freshHome();
+  const snapshot = await recordGraftConfiguration({
+    provider: 'openai', model: 'gpt-5.2-codex', reasoningEffort: 'high',
+  }, home, {});
+  assert.ok(snapshot);
+  await recordInvocation({ command: 'ask', surface: 'cli', savedTokens: 700, configSnapshotId: snapshot! }, home);
+  await recordInvocation({ command: 'map', surface: 'mcp', savedTokens: 300 }, home);
+
+  const report = await readStatsReport({ home });
+  assert.deepEqual(report.modelEfforts, [
+    { provider: 'unknown', model: 'unknown', reasoningEffort: 'unknown', calls: 2, savedTokens: 1000 },
+  ]);
+  assert.match(formatStatsReport(report), /unknown\/unknown \(unknown\)/);
 });
 
 test('machine stats upgrade databases created before session IDs', async () => {
