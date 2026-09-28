@@ -435,7 +435,9 @@ test("file-summary router withholds an incomplete change window", async () => {
     synthesizer: { async synthesize() { return []; } },
     deepBuildRouter: { async route(input) {
       assert.equal(input.items[0].change, undefined);
-      assert.equal(input.capabilities, undefined);
+      assert.deepEqual(input.capabilities, {
+        fileSummaryChangeContext: "complete-line-window-v1",
+      });
       return [{ key: input.items[0].key, action: "process" }];
     } },
   }).init(repo);

@@ -233,8 +233,9 @@ export async function buildContext(dir: string, opts: BuildOptions): Promise<Bui
       // response must not abort the normal file-summary pass.
       let route: { key: string; action: "process" | "skip" | "reuse" } | undefined;
       try {
-        const change = hit && typeof hit.source === "string"
-          ? completeLineChangeContext(hit.source, code)
+        const priorSource = typeof hit?.source === "string" ? hit.source : undefined;
+        const change = priorSource !== undefined
+          ? completeLineChangeContext(priorSource, code)
           : undefined;
         const raw = await opts.router.route({
           phase: "file-summary",
@@ -246,7 +247,9 @@ export async function buildContext(dir: string, opts: BuildOptions): Promise<Bui
             prior: hit ? { contentHash: hit.hash, value: hit.summary } : undefined,
             ...(change ? { change } : {}),
           }],
-          ...(change ? { capabilities: { fileSummaryChangeContext: change.kind } } : {}),
+          ...(priorSource !== undefined
+            ? { capabilities: { fileSummaryChangeContext: "complete-line-window-v1" as const } }
+            : {}),
         });
         if (Array.isArray(raw)) {
           const candidate = raw.find((decision): decision is { key: string; action: "process" | "skip" | "reuse" } =>
