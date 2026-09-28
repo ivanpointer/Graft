@@ -105,21 +105,21 @@ test('parseSavings sums every footer, tolerant of commas', () => {
 
 // ── recordToolUse ──────────────────────────────────────────────────────────
 
-test('recordToolUse increments the right counter and accumulates savings', () => {
+test('recordToolUse increments the right counter and accumulates savings', async () => {
   const d = fresh();
-  recordToolUse(d, 's1', { kind: 'graft', savedTokens: 500 });
-  recordToolUse(d, 's1', { kind: 'graft' });
-  recordToolUse(d, 's1', { kind: 'source' });
+  await recordToolUse(d, 's1', { kind: 'graft', savedTokens: 500 });
+  await recordToolUse(d, 's1', { kind: 'graft' });
+  await recordToolUse(d, 's1', { kind: 'source' });
   const s = readSession(d, 's1');
   assert.equal(s.graftReads, 2);
   assert.equal(s.sourceReads, 1);
   assert.equal(s.savedTokens, 500);
 });
 
-test('recordToolUse is a no-op when there is nothing to record (no file written)', () => {
+test('recordToolUse is a no-op when there is nothing to record (no file written)', async () => {
   const d = fresh();
-  recordToolUse(d, 's1', { kind: null, savedTokens: 0 });
-  recordToolUse(d, 's1', {});
+  await recordToolUse(d, 's1', { kind: null, savedTokens: 0 });
+  await recordToolUse(d, 's1', {});
   // readSession returns the empty default without a file; the proof it never
   // wrote is that a fresh empty session equals what we read.
   const s = readSession(d, 's1');
@@ -128,19 +128,19 @@ test('recordToolUse is a no-op when there is nothing to record (no file written)
   assert.equal(s.savedTokens, 0);
 });
 
-test('recordToolUse can log savings on a graft read with no explicit kind classification', () => {
+test('recordToolUse can log savings on a graft read with no explicit kind classification', async () => {
   const d = fresh();
-  recordToolUse(d, 's1', { kind: 'graft', savedTokens: 1990 });
+  await recordToolUse(d, 's1', { kind: 'graft', savedTokens: 1990 });
   assert.equal(readSession(d, 's1').savedTokens, 1990);
   assert.equal(readSession(d, 's1').graftReads, 1);
 });
 
-test('recordToolUse stamps the host once — the first tool use owns the attribution', () => {
+test('recordToolUse stamps the host once — the first tool use owns the attribution', async () => {
   const d = fresh();
-  recordToolUse(d, 's1', { kind: 'graft', host: 'cursor' });
+  await recordToolUse(d, 's1', { kind: 'graft', host: 'cursor' });
   assert.equal(readSession(d, 's1').host, 'cursor');
   // a later use from a different host must not overwrite the stamp
-  recordToolUse(d, 's1', { kind: 'source', host: 'claude-code' });
+  await recordToolUse(d, 's1', { kind: 'source', host: 'claude-code' });
   assert.equal(readSession(d, 's1').host, 'cursor', 'host is not re-stamped');
 });
 
