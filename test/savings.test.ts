@@ -4,7 +4,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { savingsFor, savingsLine, withSavings, toTokens, setInputRate } from '../src/context/savings.js';
+import { savingsFor, savingsLine, withSavings, withInvocationId, sumSavingsFooters, toTokens, setInputRate } from '../src/context/savings.js';
 import { hasSavingsTally } from '../src/claude/tally.js';
 import type { GraphV1, NodeV1 } from '../src/graph/types.js';
 
@@ -78,6 +78,15 @@ test('withSavings: puts the line on top so `head -N` and host truncation keep it
 
 test('withSavings: returns the body untouched when there is nothing to claim', () => {
   assert.equal(withSavings('body', undefined), 'body');
+});
+
+test('invocation metadata preserves the savings headline and its parser', () => {
+  const body = withSavings('body', { files: 2, baselineChars: 8000 });
+  const output = withInvocationId(body, '123e4567-e89b-42d3-a456-426614174000');
+  assert.match(output, /^\[graft\] tokens saved ≈ [\d,]+/);
+  assert.match(output.split('\n')[1], /^\[graft\] invocation_id=123e4567-e89b-42d3-a456-426614174000$/);
+  assert.equal(sumSavingsFooters(output), sumSavingsFooters(body));
+  assert.equal(withInvocationId('error', null), 'error');
 });
 
 test('the turn nudge carries no dollar figure until a rate is set', () => {

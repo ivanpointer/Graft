@@ -59,7 +59,7 @@ import { formatUpgradeReport, formatVersionReport, getNpmViewVersion, readCurren
 import { patchBuildConfig, type BuildConfig } from "./util/state.js";
 import { normalizePathPrefix } from "./util/paths.js";
 import { latestSession, formatSessionStats, sessionInputRate } from "./claude/session-metrics.js";
-import { setInputRate } from "./context/savings.js";
+import { invocationIdLine, setInputRate } from "./context/savings.js";
 import { beginInvocation, setInvocationRepo, takeInvocation } from "./stats/current.js";
 import { formatStatsReport, readStatsReport, recordInvocation } from "./stats/store.js";
 import { recordGraftConfiguration } from "./stats/config.js";
@@ -263,15 +263,17 @@ program.hook("postAction", async (_parent, action) => {
     track("query", { command: name, surface: "cli", hit: queryNote.hit }, { repo: queryNote.repo });
   }
   // `stats` reads this database; recording the read would make the report
-  // change merely because it was viewed. Internal maintenance commands are not
-  // user work either.
-  if (name === "stats" || name.startsWith("_")) return;
+  // change merely because it was viewed. The MCP server records each tool call
+  // itself, and its startup is not another invocation. Internal maintenance
+  // commands are not user work either.
+  if (name === "stats" || name === "mcp" || name.startsWith("_")) return;
   const configSnapshotId = await recordGraftConfiguration(cliConfig());
-  await recordInvocation({
+  const invocationId = await recordInvocation({
     command: name,
     surface: "cli",
     repo: queryNote.repo ?? observation?.repo,
     host: "cli",
+    ok: !process.exitCode,
     hit: queryNote.hit === undefined ? undefined : queryNote.hit === "yes",
     durationMs: observation ? Date.now() - observation.startedAt : undefined,
     savedTokens: observation?.savedTokens,
@@ -280,6 +282,7 @@ program.hook("postAction", async (_parent, action) => {
     sourceFiles: observation?.sourceFiles,
     configSnapshotId: configSnapshotId ?? undefined,
   });
+  if (invocationId) console.error(invocationIdLine(invocationId));
 });
 
 // Hidden from --help: only ever spawned detached by maybeRefreshInBackground.

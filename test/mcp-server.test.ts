@@ -5,10 +5,16 @@ import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { once } from 'node:events';
+import { DatabaseSync } from 'node:sqlite';
 import { buildGraph } from '../src/graph/build.js';
+import { sumSavingsFooters } from '../src/context/savings.js';
+import { statsPath } from '../src/stats/store.js';
 
-async function rpc(messages: object[], dir: string, expected: number): Promise<any[]> {
-  const child = spawn(process.execPath, ['--import', 'tsx', 'src/cli.ts', 'mcp', dir], { stdio: ['pipe', 'pipe', 'pipe'] });
+async function rpc(messages: object[], dir: string, expected: number, statsHome?: string): Promise<any[]> {
+  const child = spawn(process.execPath, ['--import', 'tsx', 'src/cli.ts', 'mcp', dir], {
+    stdio: ['pipe', 'pipe', 'pipe'],
+    env: statsHome ? { ...process.env, GRAFT_STATS_HOME: statsHome } : process.env,
+  });
   const responses: any[] = [];
   let buf = '';
   child.stdout.on('data', (d) => {
@@ -30,6 +36,7 @@ async function rpc(messages: object[], dir: string, expected: number): Promise<a
 
 test('initialize → tools/list → tools/call round-trip', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'graft-mcpsrv-'));
+  const statsHome = mkdtempSync(join(tmpdir(), 'graft-mcpsrv-stats-'));
   const rs = await rpc(
     [
       { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 't', version: '0' } } },
@@ -39,6 +46,7 @@ test('initialize → tools/list → tools/call round-trip', async () => {
     ],
     dir,
     3,
+    statsHome,
   );
   assert.equal(rs.length, 3);
   const init = rs.find((r) => r.id === 1);
@@ -57,6 +65,38 @@ test('initialize → tools/list → tools/call round-trip', async () => {
   const call = rs.find((r) => r.id === 3);
   assert.equal(call.result.isError, true); // unbuilt repo → soft error content
   assert.match(call.result.content[0].text, /graft build/);
+  assert.deepEqual(Object.keys(call.result).sort(), ['content', 'isError']);
+  const id = call.result.content[0].text.match(/^\[graft\] invocation_id=([0-9a-f-]{36})\n/i)?.[1];
+  assert.ok(id, 'error response carries the recorded invocation ID');
+  const db = new DatabaseSync(statsPath(statsHome), { readOnly: true });
+  const rows = db.prepare('SELECT id, command, surface, ok FROM invocations').all() as Array<{ id: string; command: string; surface: string; ok: number }>;
+  db.close();
+  assert.deepEqual(rows, [{ id, command: 'graft_trace_calls', surface: 'mcp', ok: 0 }]);
+});
+
+test('successful MCP tool call keeps one savings footer and exposes its recorded ID', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'graft-mcpsrv-success-'));
+  const statsHome = mkdtempSync(join(tmpdir(), 'graft-mcpsrv-success-stats-'));
+  mkdirSync(join(dir, 'src'));
+  writeFileSync(join(dir, 'src', 'math.ts'),
+    '/** ' + 'Math module context. '.repeat(300) + ' */\nexport function add(a: number, b: number) { return a + b; }\n');
+  await buildGraph(dir);
+  const rs = await rpc([
+    { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26' } },
+    { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'graft_repo_map', arguments: {} } },
+  ], dir, 2, statsHome);
+  const call = rs.find((r) => r.id === 2);
+  assert.equal(call.result.isError, false);
+  assert.deepEqual(Object.keys(call.result).sort(), ['content', 'isError']);
+  const text = call.result.content[0].text as string;
+  assert.match(text, /^\[graft\] tokens saved ≈ [\d,]+/);
+  const id = text.match(/^\[graft\] invocation_id=([0-9a-f-]{36})$/im)?.[1];
+  assert.ok(id);
+  assert.equal((text.match(/\[graft\] tokens saved ≈ [\d,]+/g) ?? []).length, 1);
+  const db = new DatabaseSync(statsPath(statsHome), { readOnly: true });
+  const rows = db.prepare('SELECT id, command, surface, ok, saved_tokens FROM invocations').all() as Array<{ id: string; command: string; surface: string; ok: number; saved_tokens: number }>;
+  db.close();
+  assert.deepEqual(rows, [{ id, command: 'graft_repo_map', surface: 'mcp', ok: 1, saved_tokens: sumSavingsFooters(text) }]);
 });
 
 const ALL_TOOLS = [

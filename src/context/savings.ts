@@ -142,6 +142,24 @@ export function sumSavingsFooters(text: string): number {
   return total;
 }
 
+/** Machine-readable correlation for one recorded command or MCP tool call.
+ * Kept separate from savings lines: a workspace response can contain several
+ * savings estimates, while the invocation row covers the whole call. */
+export function invocationIdLine(id: string): string {
+  return `[graft] invocation_id=${id}`;
+}
+
+/** Keep an existing savings headline first so short output previews retain it. */
+export function withInvocationId(text: string, id: string | null): string {
+  if (!id) return text;
+  const line = invocationIdLine(id);
+  if (text.startsWith('[graft] tokens saved ≈ ')) {
+    const end = text.indexOf('\n');
+    if (end >= 0) return `${text.slice(0, end)}\n${line}${text.slice(end)}`;
+  }
+  return `${line}\n${text}`;
+}
+
 /** Render `body` with the savings line on TOP.
  *
  * Deliberately a header, not a footer: agents routinely pipe graft through

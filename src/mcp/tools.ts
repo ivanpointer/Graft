@@ -11,7 +11,7 @@ import { ensureFreshChildren, ensureFreshGraph, refreshNote } from '../graph/ref
 import { contextDirFor } from '../context/node-file.js';
 import { resolveSymbol, edgeWalk, type Direction, type EdgeHit } from '../graph/traverse.js';
 import { callersSavings, headerOf, hitLine, looseNoteFor } from '../graph/traverse-cli.js';
-import { withSavings, setInputRate, sumSavingsFooters } from '../context/savings.js';
+import { withSavings, setInputRate, sumSavingsFooters, withInvocationId } from '../context/savings.js';
 import { sessionInputRate } from '../claude/session-metrics.js';
 import { recordInvocation } from '../stats/store.js';
 import { recordGraftConfiguration } from '../stats/config.js';
@@ -243,18 +243,19 @@ export async function callTool(
     const res = fed ?? (await callSingleTool(root, name, args, dirOverride));
     const result = note ? { ...res, text: `${note}\n${res.text}` } : res;
     const configSnapshotId = await recordGraftConfiguration({ contextDir: dirOverride });
-    await recordInvocation({
+    const invocationId = await recordInvocation({
       command: name, surface: 'mcp', repo: root, host: 'mcp', ok: !result.isError,
       durationMs: Date.now() - startedAt, savedTokens: sumSavingsFooters(result.text), configSnapshotId: configSnapshotId ?? undefined,
     });
-    return result;
+    return { ...result, text: withInvocationId(result.text, invocationId) };
   } catch (err) {
     const configSnapshotId = await recordGraftConfiguration({ contextDir: dirOverride });
-    await recordInvocation({
+    const invocationId = await recordInvocation({
       command: canonicalName, surface: 'mcp', repo: root, host: 'mcp', ok: false,
       durationMs: Date.now() - startedAt, configSnapshotId: configSnapshotId ?? undefined,
     });
-    return { text: err instanceof Error ? err.message : String(err), isError: true };
+    const message = err instanceof Error ? err.message : String(err);
+    return { text: withInvocationId(message, invocationId), isError: true };
   }
 }
 
