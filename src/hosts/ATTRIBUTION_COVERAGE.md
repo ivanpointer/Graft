@@ -4,6 +4,17 @@ Graft records saved tokens once, on the CLI or MCP invocation. A host adapter
 adds a tool observation only when the actual tool result contains one standalone
 `[graft] invocation_id=<uuid>` line. Observations carry no additional savings.
 
+For machine-wide Gemini `AfterTool` settings, set the command to
+`graft agent-hook gemini-after-tool`. It reads Gemini's native hook JSON from
+stdin and emits exactly `{}` followed by a newline on stdout, including for
+malformed or unrelated input. It writes no transcript or secret fields.
+
+A machine-wide OpenCode V1 plugin can call `graft agent-hook opencode-after-tool`
+with a JSON object containing `{ "input": <tool.execute.after input>,
+"output": <tool.execute.after output>, "repo": <project directory> }` on stdin.
+That command also emits only `{}` on stdout. The plugin should pass the native
+event values directly; it need not read session history or global model config.
+
 | Host | Native result used | Confirmed join fields | Model / effort in confirmed report |
 | --- | --- | --- | --- |
 | Gemini CLI | `AfterTool.tool_response.llmContent` or `returnDisplay` from a Graft MCP or CLI tool call | Graft invocation ID; `session_id`; `cwd` | `unknown` / `unknown` |

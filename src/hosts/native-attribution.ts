@@ -91,15 +91,30 @@ export async function observeOpenCodeAfterTool(input: unknown, output: unknown, 
     repo, sessionId: event.sessionID, toolUseId: event.callID, home });
 }
 
-/** Gemini's command hook protocol requires JSON-only stdout and exit 0. */
-export async function mainGeminiHook(): Promise<void> {
+async function readHookPayload(): Promise<unknown> {
   try {
     let raw = '';
     for await (const chunk of process.stdin) {
       raw += chunk.toString();
       if (raw.length > 2_000_000) break;
     }
-    if (raw.length <= 2_000_000) await observeGeminiAfterTool(JSON.parse(raw));
+    return raw.length <= 2_000_000 ? JSON.parse(raw) : null;
+  } catch { return null; }
+}
+
+/** Gemini's command hook protocol requires JSON-only stdout and exit 0. */
+export async function mainGeminiHook(): Promise<void> {
+  try { await observeGeminiAfterTool(await readHookPayload()); }
+  catch { /* Statistics must not interrupt the host. */ }
+  process.stdout.write('{}\n');
+}
+
+/** Stable subprocess entry for a machine-wide OpenCode V1 plugin. */
+export async function mainOpenCodeHook(): Promise<void> {
+  try {
+    const payload = object(await readHookPayload());
+    if (payload) await observeOpenCodeAfterTool(payload.input, payload.output,
+      typeof payload.repo === 'string' ? payload.repo : undefined);
   } catch { /* Statistics must not interrupt the host. */ }
   process.stdout.write('{}\n');
 }

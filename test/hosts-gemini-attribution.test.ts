@@ -17,15 +17,19 @@ test('Gemini settings merge keeps foreign hooks, replaces own hook, and stays id
   mkdirSync(join(repo, '.gemini'));
   writeFileSync(settings(repo), JSON.stringify({ theme: 'custom', hooks: { AfterTool: [
     { matcher: 'read_file', hooks: [{ type: 'command', command: 'other.sh' }] },
-    { hooks: [{ type: 'command', command: 'node old/graft-attribution.mjs' }] },
+    { hooks: [
+      { type: 'command', command: 'node old/graft-attribution.mjs' },
+      { type: 'command', command: 'shared-group-foreign.sh' },
+    ] },
   ] } }));
   assert.equal(geminiAttributionTargets(repo).length, 2);
   installGeminiAttribution(repo);
   const first = JSON.parse(readFileSync(settings(repo), 'utf8'));
   assert.equal(first.theme, 'custom');
-  assert.equal(first.hooks.AfterTool.length, 2);
+  assert.equal(first.hooks.AfterTool.length, 3);
   assert.equal(first.hooks.AfterTool[0].hooks[0].command, 'other.sh');
-  assert.match(first.hooks.AfterTool[1].matcher, /mcp_graft_/);
+  assert.equal(first.hooks.AfterTool[1].hooks[0].command, 'shared-group-foreign.sh');
+  assert.match(first.hooks.AfterTool[2].matcher, /mcp_graft_/);
   assert.deepEqual(installGeminiAttribution(repo).map((x) => x.action), ['unchanged', 'unchanged']);
 });
 

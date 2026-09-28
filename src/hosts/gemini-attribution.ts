@@ -19,8 +19,21 @@ export function geminiAttributionTargets(repo: string): PlannedWrite[] {
   ];
 }
 
-function owned(entry: unknown): boolean {
-  return JSON.stringify(entry ?? '').includes('graft-attribution.mjs');
+/** Keep foreign commands even if a user placed them in Graft's hook group. */
+export function withoutGeminiAttributionHooks(entries: unknown[]): unknown[] {
+  return entries.flatMap((entry) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return [entry];
+    const group = entry as Record<string, unknown>;
+    if (!Array.isArray(group.hooks)) return [entry];
+    const kept = group.hooks.filter((hook: unknown) => {
+      if (!hook || typeof hook !== 'object' || Array.isArray(hook)) return true;
+      const candidate = hook as Record<string, unknown>;
+      return candidate.type !== 'command' || typeof candidate.command !== 'string'
+        || !candidate.command.includes('graft-attribution.mjs');
+    });
+    if (kept.length === group.hooks.length) return [entry];
+    return kept.length > 0 ? [{ ...group, hooks: kept }] : [];
+  });
 }
 
 export function installGeminiAttribution(repo: string): ConfigWrite[] {
@@ -36,7 +49,7 @@ export function installGeminiAttribution(repo: string): ConfigWrite[] {
   if (hooks.AfterTool !== undefined && !Array.isArray(hooks.AfterTool)) return [shim, skipped];
   const prior: unknown[] = hooks.AfterTool ?? [];
   hooks.AfterTool = [
-    ...prior.filter((entry) => !owned(entry)),
+    ...withoutGeminiAttributionHooks(prior),
     {
       matcher: 'mcp_graft_.*|run_shell_command',
       hooks: [{ name: 'graft-attribution', type: 'command', command: `node "${shimPath(repo)}"`, timeout: 8000 }],

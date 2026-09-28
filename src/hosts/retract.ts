@@ -30,6 +30,8 @@ import { HOSTS } from './registry.js';
 import { ALL_MARKERS, type Markers } from './sections.js';
 import { mcpTargets, stripTomlSection } from './mcp-config.js';
 import { hookTargets } from './codex-hooks.js';
+import { geminiAttributionTargets, withoutGeminiAttributionHooks } from './gemini-attribution.js';
+import { openCodeAttributionTargets } from './opencode-attribution.js';
 import { antigravitySkillTargets } from './antigravity.js';
 import { claudeGlobalTargets } from './claude-global.js';
 import { claudeTargets } from '../claude/init.js';
@@ -294,6 +296,39 @@ function stripCodexHooks(path: string, apply: boolean): RetractAction {
   return 'removed';
 }
 
+/** Remove both Graft contributions to Gemini's shared project settings. */
+function stripGeminiSettings(path: string, apply: boolean): RetractAction {
+  if (!existsSync(path)) return 'absent';
+  let root: Record<string, any>;
+  try { root = JSON.parse(readFileSync(path, 'utf8')); }
+  catch { return 'skipped-unparseable'; }
+  if (!root || typeof root !== 'object' || Array.isArray(root)) return 'skipped-unparseable';
+
+  let changed = false;
+  const servers = root.mcpServers;
+  if (servers && typeof servers === 'object' && !Array.isArray(servers) && 'graft' in servers) {
+    delete servers.graft;
+    if (Object.keys(servers).length === 0) delete root.mcpServers;
+    changed = true;
+  }
+  const hooks = root.hooks;
+  if (hooks && typeof hooks === 'object' && !Array.isArray(hooks) && Array.isArray(hooks.AfterTool)) {
+    const prior: unknown[] = hooks.AfterTool;
+    const kept = withoutGeminiAttributionHooks(prior);
+    if (JSON.stringify(kept) !== JSON.stringify(prior)) {
+      if (kept.length === 0) delete hooks.AfterTool;
+      else hooks.AfterTool = kept;
+      if (Object.keys(hooks).length === 0) delete root.hooks;
+      changed = true;
+    }
+  }
+  if (!changed) return 'absent';
+  if (!apply) return Object.keys(root).length === 0 ? 'deleted' : 'removed';
+  if (Object.keys(root).length === 0) return removeFile(path, true);
+  writeFileSync(path, `${JSON.stringify(root, null, 2)}\n`);
+  return 'removed';
+}
+
 /**
  * Drop graft's block from `.gitignore` / `.ignore`.
  *
@@ -416,8 +451,20 @@ function targets(repo: string, opts: RetractOpts): Target[] {
     if (opts.global === false && t.scope === 'global') continue;
     add({
       hostId: t.hostId, path: t.path, what: t.what, scope: t.scope,
-      run: (a) => (t.format === 'toml' ? removeTomlSection(t.path, a) : removeJsonKey(t.path, t.topKey!, a)),
+      run: (a) => (t.hostId === 'gemini' ? stripGeminiSettings(t.path, a)
+        : t.format === 'toml' ? removeTomlSection(t.path, a) : removeJsonKey(t.path, t.topKey!, a)),
     });
+  }
+
+  // Gemini's settings.json is handled with its MCP key above, so it appears
+  // once in the plan. These two generated files are wholly Graft-owned.
+  if (!exclude.has('gemini')) {
+    const shim = geminiAttributionTargets(repo)[0];
+    add({ hostId: shim.hostId, path: shim.path, what: shim.what, scope: shim.scope, run: (a) => removeFile(shim.path, a) });
+  }
+  if (!exclude.has('agents')) {
+    const plugin = openCodeAttributionTargets(repo)[0];
+    add({ hostId: plugin.hostId, path: plugin.path, what: plugin.what, scope: plugin.scope, run: (a) => removeFile(plugin.path, a) });
   }
 
   // 3. Claude Code: settings fragments, both shims, the skill, and the .mcp.json key.

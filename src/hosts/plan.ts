@@ -14,6 +14,8 @@ import { HOSTS, detectHosts, type DetectProbe, type HostTarget } from './registr
 import { mcpTargets } from './mcp-config.js';
 import { hookTargets } from './codex-hooks.js';
 import { cursorHookTargets } from './cursor-hooks.js';
+import { geminiAttributionTargets } from './gemini-attribution.js';
+import { openCodeAttributionTargets } from './opencode-attribution.js';
 import { antigravitySkillTargets } from './antigravity.js';
 import { claudeTargets } from '../claude/init.js';
 import { claudeGlobalTargets } from './claude-global.js';
@@ -65,7 +67,10 @@ function instructionTarget(repo: string, host: HostTarget): PlannedWrite {
  * touch. Claude Code comes first — it's the deep integration and the picker's
  * default. `ids`, when given, restricts the plan to those hosts.
  */
-export function planInit(repo: string, opts: { home?: string; ids?: string[] } = {}): HostPlan[] {
+export function planInit(
+  repo: string,
+  opts: { home?: string; ids?: string[]; hooks?: boolean; mcp?: boolean; global?: boolean } = {},
+): HostPlan[] {
   const home = opts.home ?? homedir();
   const probe = probeFor(home, repo);
   const detected = new Set(detectHosts(probe).map((h) => h.id));
@@ -83,13 +88,21 @@ export function planInit(repo: string, opts: { home?: string; ids?: string[] } =
         instructionTarget(repo, host),
         ...mcpTargets(repo, [host.id], { home }),
         ...(host.id === 'agents' ? hookTargets(home) : []),
+        ...(host.id === 'agents' && probe.dirExists(join(home, '.config', 'opencode'))
+          ? openCodeAttributionTargets(repo) : []),
         ...(host.id === 'cursor' ? cursorHookTargets(repo) : []),
+        ...(host.id === 'gemini' ? geminiAttributionTargets(repo) : []),
         ...(host.id === 'antigravity' ? antigravitySkillTargets(home) : []),
       ],
     })),
   ];
 
-  return opts.ids ? plans.filter((p) => opts.ids!.includes(p.id)) : plans;
+  const selected = opts.ids ? plans.filter((p) => opts.ids!.includes(p.id)) : plans;
+  return selected.map((plan) => ({ ...plan, writes: plan.writes.filter((write) =>
+    (opts.global !== false || write.scope !== 'global')
+    && (plan.id === 'claude' || opts.mcp !== false || write.kind !== 'mcp')
+    && (plan.id === 'claude' || opts.hooks !== false || write.kind !== 'hook'),
+  ) }));
 }
 
 /** Flatten a plan down to the writes for the selected host ids. */

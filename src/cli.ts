@@ -14,8 +14,10 @@ import type { ProviderKind } from "./ai/llm/factory.js";
 import { formatCheckReport } from "./context/check.js";
 import { formatGraphCheckReport } from "./graph/check.js";
 import { buildGraphIfMissing, runInit } from "./claude/init.js";
+import { main as mainLegacyAgentHook } from "./claude/hooks.js";
 import { statuslineWanted } from "./claude/settings-merge.js";
 import { runHostsInit } from "./hosts/init.js";
+import { mainGeminiHook, mainOpenCodeHook } from "./hosts/native-attribution.js";
 import { hostIds } from "./hosts/registry.js";
 import { parseBrainArg, connectBrain, pullBrain, brainStatus } from "./brain/connect.js";
 import { rulesForPointers } from "./brain/attach.js";
@@ -228,7 +230,7 @@ function parseTabs(raw: string | undefined): VizTab[] | undefined {
  * not editorialize on stderr at startup (`mcp` runs its own upkeep at boot, and
  * `_update-check` IS the fetch).
  */
-const UPKEEP_SKIP = new Set(["version", "upgrade", "_update-check", "_brain-refresh", "mcp"]);
+const UPKEEP_SKIP = new Set(["version", "upgrade", "_update-check", "_brain-refresh", "mcp", "agent-hook"]);
 
 /**
  * Every other command: top up the cached registry answer in the background and,
@@ -266,7 +268,7 @@ program.hook("postAction", async (_parent, action) => {
   // change merely because it was viewed. The MCP server records each tool call
   // itself, and its startup is not another invocation. Internal maintenance
   // commands are not user work either.
-  if (name === "stats" || name === "mcp" || name.startsWith("_")) return;
+  if (name === "stats" || name === "mcp" || name === "agent-hook" || name.startsWith("_")) return;
   const configSnapshotId = await recordGraftConfiguration(cliConfig());
   const invocationId = await recordInvocation({
     command: name,
@@ -992,6 +994,22 @@ program
     process.stdout.write(formatRepoMap(map));
   });
 
+const LEGACY_AGENT_HOOK_EVENTS = new Set([
+  "session-start", "prompt", "post-edit", "tool-savings", "stop", "post-model-switch",
+  "post-edit-sync", "cursor-post-tool", "cursor-mcp", "cursor-session-end",
+]);
+
+program
+  .command("agent-hook")
+  .description("Process a native agent hook payload")
+  .argument("<event>", "host hook event")
+  .action(async (event: string) => {
+    if (event === "gemini-after-tool") await mainGeminiHook();
+    else if (event === "opencode-after-tool") await mainOpenCodeHook();
+    else if (LEGACY_AGENT_HOOK_EVENTS.has(event)) await mainLegacyAgentHook(event);
+    else process.stdout.write('{}\n'); // unknown event: neutral, fail open
+  });
+
 program
   .command("init")
   .description("Wire Graft into the AI coding agents used with this repo (instruction files + MCP server; full hooks + statusline + MCP for Claude Code)")
@@ -1101,9 +1119,13 @@ async function runInitCommand(dir: string, opts: InitOptions, how: { epilogue?: 
     const targets = [repo, ...children.map((c) => join(repo, c))];
 
     if (opts.dryRun) {
-      console.error(formatPlan(plan, ids, repo, home));
+      console.error(formatPlan(planInit(repo, {
+        home, mcp: opts.mcp, hooks: opts.hooks, global: opts.global,
+      }), ids, repo, home));
       for (const child of children)
-        console.error(`\n— ${child}/ (workspace child)\n` + formatPlan(planInit(join(repo, child), { home }), ids, join(repo, child), home));
+        console.error(`\n— ${child}/ (workspace child)\n` + formatPlan(planInit(join(repo, child), {
+          home, mcp: opts.mcp, hooks: opts.hooks, global: opts.global,
+        }), ids, join(repo, child), home));
       return;
     }
     if (ids.length === 0) {
