@@ -8,6 +8,7 @@ import {
 } from "../src/ai/decisions.js";
 import { disambiguateEdges } from "../src/graph/disambiguate.js";
 import { enrichGraph } from "../src/graph/enrich.js";
+import { readMeaningSourceCache } from "../src/graph/meaning-source-cache.js";
 import type { AskResult } from "../src/ask/ask.js";
 import type { NodeV1 } from "../src/graph/types.js";
 import { tmpRepo } from "./helpers.js";
@@ -207,6 +208,123 @@ test("deep-build router remaps an unchanged crux after lines shift", async () =>
   assert.equal(calls, 0);
   assert.equal(stats.reused, 1);
   assert.deepEqual(current[0].crux, { code: "  return stable();\r", span: "L3-L3" });
+});
+
+test("deep-build router receives complete bounded symbol changes from a hash-matched source snapshot", async () => {
+  const path = "main.ts";
+  const previousSource = "export function keep() {\n  // old explanation\n  return stable();\n}\n";
+  const source = "export function keep() {\n  // clearer explanation\n  return stable();\n}\n";
+  const current = [node(`${path}#keep`, path)];
+  current[0].span = "L1-L4";
+  current[0].body_hash = "symbol-new";
+  const previous: NodeV1 = {
+    ...current[0], body_hash: "symbol-old", summary_state: "ready", summary: "Returns the stable result.",
+    crux: { code: "  return stable();", span: "L3-L3" },
+  };
+  const priorFile: NodeV1 = {
+    ...node(path, path), id: path, name: path, kind: "file", span: "L1-L4", signature: null,
+    body_hash: "file-old", summary_state: "ready", summary: "Contains keep.",
+  };
+  let calls = 0;
+  const stats = await enrichGraph(
+    current,
+    new Map([[previous.id, previous], [priorFile.id, priorFile]]),
+    new Map([[path, source]]),
+    {
+      concurrency: 1,
+      priorSources: new Map([[path, { hash: "file-old", source: previousSource }]]),
+      router: { async route(input) {
+        assert.deepEqual(input.capabilities, {
+          symbolMeaningReuse: "exact-crux-remap",
+          symbolMeaningChangeContext: "complete-line-window-v1",
+        });
+        assert.deepEqual(input.items[0].change, {
+          kind: "complete-line-window-v1",
+          previous: { startLine: 1, lineCount: 4, code: previousSource.trimEnd() },
+          current: { startLine: 1, lineCount: 4, code: source.trimEnd() },
+        });
+        assert.deepEqual(input.items[0].prior?.crux, { code: "  return stable();", span: "L3-L3" });
+        return [{ key: "s0", action: "reuse" }];
+      } },
+      summarizer: { async describeFile() { calls++; return []; } },
+    },
+  );
+
+  assert.equal(calls, 0);
+  assert.equal(stats.reused, 1);
+  assert.equal(current[0].summary, "Returns the stable result.");
+});
+
+test("deep-build router ignores a symbol source snapshot that does not match the prior file hash", async () => {
+  const path = "main.ts";
+  const source = "export function keep() { return stable(); }\n";
+  const current = [node(`${path}#keep`, path)];
+  current[0].span = "L1-L1";
+  current[0].body_hash = "symbol-new";
+  const previous: NodeV1 = {
+    ...current[0], body_hash: "symbol-old", summary_state: "ready", summary: "Returns the stable result.", crux: null,
+  };
+  const priorFile: NodeV1 = {
+    ...node(path, path), id: path, name: path, kind: "file", span: "L1-L1", signature: null,
+    body_hash: "trusted-file-hash", summary_state: "ready", summary: "Contains keep.",
+  };
+  await enrichGraph(
+    current,
+    new Map([[previous.id, previous], [priorFile.id, priorFile]]),
+    new Map([[path, source]]),
+    {
+      concurrency: 1,
+      priorSources: new Map([[path, { hash: "stale-sidecar-hash", source: "untrusted old source" }]]),
+      router: { async route(input) {
+        assert.deepEqual(input.capabilities, { symbolMeaningReuse: "exact-crux-remap" });
+        assert.equal(input.items[0].change, undefined);
+        return [{ key: "s0", action: "reuse" }];
+      } },
+      summarizer: { async describeFile() { throw new Error("should reuse through the legacy path"); } },
+    },
+  );
+  assert.equal(current[0].summary_state, "ready");
+});
+
+test("graph builds persist exact meaning sources for the next bounded symbol route", async () => {
+  const repo = tmpRepo("decision-route-symbol-source-cache");
+  const file = join(repo, "main.ts");
+  writeFileSync(file, "export const label = 'stable';\nexport function keep() {\n  // old explanation\n  return stable();\n}\n");
+  await new Graft({
+    cruxSummarizer: { async describeFile(input) {
+      return input.nodes.map((ref) => ({
+        id: ref.id,
+        summary: `Meaning for ${ref.id}`,
+        crux_start: Math.min(ref.endLine, 4),
+        crux_end: Math.min(ref.endLine, 4),
+      }));
+    } },
+  }).graph(repo, { llm: true, concurrency: 1 });
+
+  const cached = readMeaningSourceCache(join(repo, "graft"));
+  assert.match(cached.files["main.ts"]?.source ?? "", /old explanation/);
+  writeFileSync(file, "export const label = 'stable';\nexport function keep() {\n  // clearer explanation\n  return stable();\n}\n");
+
+  let summarizeCalls = 0;
+  let sawFunctionDelta = false;
+  const result = await new Graft({
+    deepBuildRouter: { async route(input) {
+      assert.equal(input.capabilities?.symbolMeaningChangeContext, "complete-line-window-v1");
+      for (const item of input.items) {
+        if (!item.source.startsWith("export function keep")) continue;
+        sawFunctionDelta = true;
+        assert.match(item.change?.previous.code ?? "", /old explanation/);
+        assert.match(item.change?.current.code ?? "", /clearer explanation/);
+      }
+      return input.items.map((item) => ({ key: item.key, action: "reuse" }));
+    } },
+    cruxSummarizer: { async describeFile() { summarizeCalls++; return []; } },
+  }).graph(repo, { llm: true, concurrency: 1 });
+
+  assert.equal(sawFunctionDelta, true);
+  assert.equal(summarizeCalls, 0);
+  assert.ok(result.meaning.reused >= 1);
+  assert.match(readMeaningSourceCache(join(repo, "graft")).files["main.ts"]?.source ?? "", /clearer explanation/);
 });
 
 test("deep-build router cannot reuse a prior meaning when its crux changed", async () => {

@@ -25,10 +25,9 @@ import { LlmFailureGate } from "../ai/failure.js";
 import type { FileSummary, SynthNode, Synthesizer } from "../ai/synthesize.js";
 import {
   MeaningRejectedError,
-  type DeepBuildChangeContext,
   type DeepBuildRouter,
-  type DeepBuildSourceWindow,
 } from "../ai/decisions.js";
+import { completeLineChangeContext } from "../ai/change-context.js";
 import {
   CACHE_DIR,
   MANIFEST_VERSION,
@@ -55,10 +54,6 @@ export const CODE_EXTENSIONS = [
 
 /** Char budget of summary text per synthesis call (keeps each call in-context). */
 const BATCH_CHAR_BUDGET = 48_000;
-
-/** Keep router evidence bounded even when the cached prior source is large. */
-const ROUTE_CHANGE_CONTEXT_LINES = 3;
-const ROUTE_CHANGE_CONTEXT_CHAR_BUDGET = 12_000;
 
 export interface BuildProgress {
   phase: "summarize" | "synthesize" | "write";
@@ -484,64 +479,6 @@ function resolveSlug(table: Map<string, string>, name: string): string | undefin
 
 function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
-}
-
-function sourceLines(source: string): string[] {
-  if (!source) return [];
-  const lines = source.split("\n");
-  if (lines[lines.length - 1] === "") lines.pop();
-  return lines;
-}
-
-function sourceWindow(lines: readonly string[], start: number, end: number): DeepBuildSourceWindow {
-  return {
-    startLine: start + 1,
-    lineCount: end - start,
-    code: lines.slice(start, end).join("\n"),
-  };
-}
-
-/**
- * Build one window containing every changed line. Widely separated changes
- * intentionally include the intervening lines; if that is too large, the
- * capability is withheld instead of presenting a misleading partial diff.
- */
-function completeLineChangeContext(previousSource: string, currentSource: string): DeepBuildChangeContext | undefined {
-  if (previousSource === currentSource) return undefined;
-  const previousLines = sourceLines(previousSource);
-  const currentLines = sourceLines(currentSource);
-  let prefix = 0;
-  while (
-    prefix < previousLines.length &&
-    prefix < currentLines.length &&
-    previousLines[prefix] === currentLines[prefix]
-  ) prefix++;
-
-  let suffix = 0;
-  while (
-    suffix < previousLines.length - prefix &&
-    suffix < currentLines.length - prefix &&
-    previousLines[previousLines.length - 1 - suffix] === currentLines[currentLines.length - 1 - suffix]
-  ) suffix++;
-
-  const previousEnd = previousLines.length - suffix;
-  const currentEnd = currentLines.length - suffix;
-  const previousStart = Math.max(0, prefix - ROUTE_CHANGE_CONTEXT_LINES);
-  const currentStart = Math.max(0, prefix - ROUTE_CHANGE_CONTEXT_LINES);
-  const context: DeepBuildChangeContext = {
-    kind: "complete-line-window-v1",
-    previous: sourceWindow(
-      previousLines,
-      previousStart,
-      Math.min(previousLines.length, previousEnd + ROUTE_CHANGE_CONTEXT_LINES),
-    ),
-    current: sourceWindow(
-      currentLines,
-      currentStart,
-      Math.min(currentLines.length, currentEnd + ROUTE_CHANGE_CONTEXT_LINES),
-    ),
-  };
-  return JSON.stringify(context).length <= ROUTE_CHANGE_CONTEXT_CHAR_BUDGET ? context : undefined;
 }
 
 function cachePath(outDir: string): string {
