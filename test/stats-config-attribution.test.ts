@@ -19,6 +19,9 @@ test('Claude Code dimensions use documented effort.level, and Cursor uses model_
     model: 'legacy-slug', model_id: 'selected-model',
     model_params: [{ id: 'thinking', value: 'true' }, { id: 'effort', value: 'max' }],
   }), { provider: 'unknown', model: 'selected-model', reasoningEffort: 'max' });
+  assert.deepEqual(harnessDimensions('cursor', { model: 'legacy-slug' }), {
+    provider: 'unknown', model: 'unknown', reasoningEffort: 'unknown',
+  });
   assert.deepEqual(harnessDimensions('other', { model: 'unverified', effort: 'high' }), {
     provider: 'unknown', model: 'unknown', reasoningEffort: 'unknown',
   });

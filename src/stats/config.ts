@@ -28,7 +28,9 @@ function payloadDimensions(host: string | undefined, input: unknown): Partial<Ha
     const params = Array.isArray(value.model_params) ? value.model_params : [];
     const effort = params.find((item: unknown) => item && typeof item === 'object'
       && (item as Record<string, unknown>).id === 'effort') as Record<string, unknown> | undefined;
-    return { model: text(value.model_id) ?? text(value.model), reasoningEffort: text(effort?.value) };
+    // `model` is Cursor's legacy configured slug; only model_id identifies the
+    // selected model in the native hook payload.
+    return { model: text(value.model_id), reasoningEffort: text(effort?.value) };
   }
   return {};
 }

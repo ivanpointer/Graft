@@ -532,6 +532,9 @@ test('host tool metadata is tied to a response marker and native per-call fields
       invocationId: INVOCATION, turnId: 'generation-1', toolUseId: undefined,
       model: 'cursor-live', reasoningEffort: 'max', metadataSource: 'host-payload',
     });
+    assert.equal(toolMetadata({ conversation_id: 'cursor-s', model: 'configured-only' },
+      'cursor', d, { text: marker }).model, undefined,
+    'the configured model slug does not prove which model made this tool call');
     assert.deepEqual(toolMetadata({ model: 'gpt-live', turn_id: 'turn-1' }, 'codex', d, { stdout: 'no marker' }), {});
   } finally {
     delete process.env.CLAUDE_PROJECT_DIR;

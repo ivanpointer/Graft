@@ -60,7 +60,7 @@ export function toolMetadata(input: any, host: 'codex' | 'claude-code' | 'cursor
   const invocationId = invocationIdFromResponse(response);
   if (!invocationId) return {};
   const model = host === 'claude-code' ? undefined
-    : hostText(host === 'cursor' ? input?.model_id ?? input?.model : input?.model);
+    : hostText(host === 'cursor' ? input?.model_id : input?.model);
   const params = Array.isArray(input?.model_params) ? input.model_params : [];
   const cursorEffort = params.find((item: any) => item?.id === 'effort')?.value;
   const reasoningEffort = host === 'claude-code' ? hostText(input?.effort?.level)
