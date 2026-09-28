@@ -80,6 +80,22 @@ test('grok gets a repo-local TOML MCP section', () => {
   assert.deepEqual(again.map((x) => x.action), ['unchanged']);
 });
 
+test('pi gets an eager machine-global MCP entry when its config dir exists', () => {
+  const repo = fresh(); const home = fresh();
+  assert.deepEqual(registerMcpConfigs(repo, ['pi'], { home }), []);
+  mkdirSync(join(home, '.pi', 'agent'), { recursive: true });
+
+  const writes = registerMcpConfigs(repo, ['pi'], { home });
+  assert.deepEqual(writes.map((x) => x.action), ['created']);
+  const config = JSON.parse(readFileSync(join(home, '.pi', 'agent', 'mcp.json'), 'utf8'));
+  assert.deepEqual(config.mcpServers.graft, {
+    command: 'npx',
+    args: ['-y', '@nanonets/graft', 'mcp'],
+    lifecycle: 'eager',
+  });
+  assert.deepEqual(registerMcpConfigs(repo, ['pi'], { home }).map((x) => x.action), ['unchanged']);
+});
+
 test('JSON with non-object mcpServers value is skipped', () => {
   const repo = fresh(); const home = fresh();
   mkdirSync(join(repo, '.cursor'), { recursive: true });

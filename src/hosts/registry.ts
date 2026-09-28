@@ -84,6 +84,19 @@ export const HOSTS: HostTarget[] = [
       p.dirExists(join(p.repo, '.hermes')),
   },
   {
+    id: 'pi',
+    name: 'Pi coding agent',
+    kind: 'section',
+    relPath: 'AGENTS.md',
+    content: instructionBody,
+    // Pi reads AGENTS.md natively. Its MCP support is supplied by the
+    // pi-mcp-extension package, whose machine-global registry lives under
+    // ~/.pi/agent/mcp.json (see mcp-config.ts).
+    detect: (p) =>
+      p.dirExists(join(p.home, '.pi', 'agent')) ||
+      p.dirExists(join(p.repo, '.pi')),
+  },
+  {
     id: 'antigravity',
     name: 'Google Antigravity',
     kind: 'section',

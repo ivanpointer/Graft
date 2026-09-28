@@ -71,6 +71,11 @@ function opencodeEntry(): object {
   return { type: 'local', command: [command, ...args], enabled: true };
 }
 
+/** pi-mcp-extension's eager stdio-server shape. */
+function piEntry(): object {
+  return { ...serverEntry(), lifecycle: 'eager' };
+}
+
 function dirExists(p: string): boolean {
   try { return statSync(p).isDirectory(); } catch { return false; }
 }
@@ -198,6 +203,21 @@ export function mcpTargets(
           hostId: id, id: 'grok', path: join(repo, '.grok', 'config.toml'),
           scope: 'repo', kind: 'mcp', what: '[mcp_servers.graft]', format: 'toml',
         });
+        break;
+      case 'pi':
+        // Pi's MCP extension reads one machine-global registry. Keep the
+        // target gated on a real Pi config dir, just like Codex/OpenCode, so
+        // selecting every host cannot install a new harness by accident.
+        if (dirExists(join(home, '.pi', 'agent'))) {
+          out.push(jsonTarget(
+            id,
+            id,
+            join(home, '.pi', 'agent', 'mcp.json'),
+            'mcpServers',
+            piEntry(),
+            'global',
+          ));
+        }
         break;
       case 'agents':
         // Guarded on the CLI actually being installed, so a plan only ever

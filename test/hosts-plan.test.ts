@@ -13,7 +13,7 @@ function fresh(): string { return tmpRepo('plan'); }
 /** A home with every CLI graft can detect installed. */
 function fullHome(): string {
   const home = fresh();
-  for (const d of ['.codex', '.cursor', '.gemini', '.kiro', '.adal', join('.codeium', 'windsurf'), join('.config', 'opencode')]) {
+  for (const d of ['.codex', '.cursor', '.gemini', '.kiro', '.adal', join('.pi', 'agent'), join('.codeium', 'windsurf'), join('.config', 'opencode')]) {
     mkdirSync(join(home, d), { recursive: true });
   }
   return home;
@@ -68,6 +68,15 @@ test('the three ~/.codex writes are scoped global', () => {
     globals.map((w) => toPosixPath(w.path.slice(home.length))).sort(),
     ['/.codex/config.toml', '/.codex/hooks.json', '/.codex/hooks/graft/graft-hooks.cjs'],
   );
+});
+
+test('Pi plans its shared AGENTS.md section plus the machine-global MCP registry', () => {
+  const home = fullHome();
+  const repo = fresh();
+  const pi = planInit(repo, { home, ids: ['pi'] })[0];
+  assert.deepEqual(pi.writes.map((w) => w.scope), ['repo', 'global']);
+  assert.match(toPosixPath(pi.writes[0].path), /AGENTS\.md$/);
+  assert.equal(toPosixPath(pi.writes[1].path.slice(home.length)), '/.pi/agent/mcp.json');
 });
 
 test('global writes vanish when the CLI is not installed', () => {
