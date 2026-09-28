@@ -175,6 +175,12 @@ export interface DeepBuildRouteCapabilities {
    */
   fileSummaryChangeContext?: "complete-line-window-v1";
   /**
+   * Changed symbol-meaning items may carry every changed line from the prior
+   * and current symbol source. Windows are relative to the corresponding item
+   * source, while any prior crux retains file-absolute coordinates.
+   */
+  symbolMeaningChangeContext?: "complete-line-window-v1";
+  /**
    * A symbol prior either has no crux or carries an excerpt whose exact lines
    * were found uniquely in the current node span. Its coordinates therefore
    * point into the current file. This proves coordinates, not that the old

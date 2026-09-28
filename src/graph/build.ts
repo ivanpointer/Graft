@@ -43,6 +43,11 @@ import type { GraphV1, Kind, NodeV1, Relation, ScopeV1 } from "./types.js";
 import type { CruxSummarizer } from "../ai/crux.js";
 import type { DeepBuildRouter, EdgeDisambiguator } from "../ai/decisions.js";
 import { disambiguateEdges } from "./disambiguate.js";
+import {
+  readMeaningSourceCache,
+  writeMeaningSourceCache,
+  type MeaningSourceEntry,
+} from "./meaning-source-cache.js";
 
 export { listSourceFiles } from "./source-files.js";
 
@@ -321,6 +326,7 @@ export async function buildGraph(
   // Read BEFORE the first checkpoint can overwrite wiring.json.
   const prior = readGraph(wiringPath(outDir));
   const priorById = new Map((prior?.nodes ?? []).map((n) => [n.id, n]));
+  const priorMeaningSources = readMeaningSourceCache(outDir);
   const meaning = await enrichGraph(nodes, priorById, sources, {
     summarizer: opts.summarizer,
     concurrency: opts.concurrency,
@@ -330,6 +336,7 @@ export async function buildGraph(
     // body_hash, so an interrupted --deep run never repays the crux it computed.
     checkpoint: () => writeGraph(graph, outDir),
     router: opts.router,
+    priorSources: new Map(Object.entries(priorMeaningSources.files)),
   });
   errors.push(...meaning.errors);
 
@@ -352,6 +359,18 @@ export async function buildGraph(
   }
 
   const graphPath = writeGraph(graph, outDir);
+  // Keep one exact file snapshot for every file that still has a ready meaning.
+  // It lives only in the private cache and is hash-checked against wiring.json
+  // before use, so a torn or stale sidecar can only disable reuse. Write after
+  // the graph: a crash between the two leaves a detectable hash mismatch.
+  const readyPaths = new Set(nodes.filter((node) => node.summary_state === "ready").map((node) => node.path));
+  const meaningSources: Record<string, MeaningSourceEntry> = {};
+  for (const path of readyPaths) {
+    const source = sources.get(path);
+    if (source === undefined) continue;
+    meaningSources[path] = { hash: contentHash(source), source };
+  }
+  writeMeaningSourceCache(outDir, meaningSources);
   // `ask`'s token/IDF sidecar — moves per-query corpus tokenization to build
   // time (~45% of query time on a 32k-node graph, profiled). Lives in the
   // cache dir; `ask` falls back to live tokenization when it's absent/stale.

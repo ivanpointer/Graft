@@ -307,6 +307,7 @@ test("seedGraph declines a --dir override and a checkout that already has a grap
   const why = `seeded .cache holds ${JSON.stringify(landed)}`;
   assert.ok(existsSync(fingerprintPath(outOf(wt))), `the freshness record travels — ${why}`);
   assert.ok(landed.includes("ask-index.json"), `the ask sidecar travels — ${why}`);
+  assert.ok(landed.includes("meaning-sources.json"), `the exact meaning source snapshot travels — ${why}`);
   assert.ok(landed.some((f) => f.startsWith("extract.")), `the extraction memo travels — ${why}`);
   assert.ok(!landed.includes("stats.json"), `borrowed savings do not — ${why}`);
   assert.ok(!landed.includes("session"), `another session's transcripts do not — ${why}`);

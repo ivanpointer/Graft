@@ -21,8 +21,10 @@
  */
 import { formatCruxMiss, type CruxMissKind, type CruxSummarizer, type NodeCrux, type NodeRef } from "../ai/crux.js";
 import { LlmFailureGate } from "../ai/failure.js";
+import { completeLineChangeContext } from "../ai/change-context.js";
 import type { Crux, NodeV1 } from "./types.js";
 import type { DeepBuildRouter, PriorMeaning } from "../ai/decisions.js";
+import type { MeaningSourceEntry } from "./meaning-source-cache.js";
 
 /** Cap on the stored crux: an over-long pick is trimmed to its leading slice. */
 const MAX_CRUX_LINES = 12;
@@ -47,6 +49,11 @@ export interface EnrichOptions {
   checkpoint?: () => void;
   /** Optional batched decision for each changed symbol before the per-file meaning call. */
   router?: DeepBuildRouter;
+  /**
+   * Exact prior file sources from the private meaning sidecar. Entries are used
+   * only when their hash matches the corresponding prior file node.
+   */
+  priorSources?: ReadonlyMap<string, MeaningSourceEntry>;
 }
 
 /** How often the crux pass flushes partial progress to disk. Read at call time (not
@@ -152,6 +159,11 @@ export async function enrichGraph(
   // provider has stopped working. Counted across the whole pass, not per worker:
   // with `-j 5` the interleaving is what a user sees as "everything is failing now".
   const gate = new LlmFailureGate();
+  const priorFileHashes = new Map(
+    [...prior.values()]
+      .filter((node) => node.kind === "file")
+      .map((node) => [node.path, node.body_hash] as const),
+  );
 
   await mapWithConcurrency(files, limit, async (path) => {
     const fileNodes = byFile.get(path)!;
@@ -179,6 +191,12 @@ export async function enrichGraph(
       const [startLine, endLine] = spanLines(n.span, lineCount);
       return { id: n.id, kind: n.kind, signature: n.signature, startLine, endLine };
     });
+    const priorSourceEntry = opts.priorSources?.get(path);
+    const priorFileSource = priorSourceEntry && priorFileHashes.get(path) === priorSourceEntry.hash
+      ? priorSourceEntry.source
+      : undefined;
+    const priorSourceLines = priorFileSource?.split("\n");
+    const itemSources = refs.map((ref) => sourceLines.slice(ref.startLine - 1, ref.endLine).join("\n"));
 
     const processNodes: NodeV1[] = [];
     const processRefs: NodeRef[] = [];
@@ -199,14 +217,27 @@ export async function enrichGraph(
         const raw = await opts.router.route({
           phase: "symbol-meaning",
           path,
-          capabilities: { symbolMeaningReuse: "exact-crux-remap" },
+          capabilities: {
+            symbolMeaningReuse: "exact-crux-remap",
+            ...(priorFileSource !== undefined
+              ? { symbolMeaningChangeContext: "complete-line-window-v1" as const }
+              : {}),
+          },
           items: refs.map((ref, index) => {
             const node = fileNodes[index];
+            const was = prior.get(node.id);
+            const previousSource = reusablePriors[index] && was && priorSourceLines
+              ? sourceForSpan(priorSourceLines, was.span)
+              : undefined;
+            const change = previousSource !== undefined
+              ? completeLineChangeContext(previousSource, itemSources[index])
+              : undefined;
             return {
               key: `s${index}`,
-              source: sourceLines.slice(ref.startLine - 1, ref.endLine).join("\n"),
+              source: itemSources[index],
               contentHash: node.body_hash,
               prior: reusablePriors[index],
+              ...(change ? { change } : {}),
             };
           }),
         });
@@ -459,4 +490,9 @@ function spanLines(span: string, fileLines: number): [number, number] {
   const start = Math.max(1, Math.min(Number(m[1]), fileLines));
   const end = Math.max(start, Math.min(Number(m[2]), fileLines));
   return [start, end];
+}
+
+function sourceForSpan(lines: readonly string[], span: string): string {
+  const [start, end] = spanLines(span, lines.length);
+  return lines.slice(start - 1, end).join("\n");
 }

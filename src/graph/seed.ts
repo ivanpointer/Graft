@@ -49,6 +49,7 @@ import { ASK_INDEX_FILE } from "../ask/index-file.js";
 import { CACHE_DIR, contextDirFor } from "../context/node-file.js";
 import { EXTRACT_CACHE_PREFIX } from "./extract-cache.js";
 import { FINGERPRINT_PREFIX } from "./fingerprint.js";
+import { MEANING_SOURCE_CACHE_FILE } from "./meaning-source-cache.js";
 import { GRAPH_DIR, wiringPath } from "./write.js";
 
 /** The one line a linked worktree's `.git` file carries. */
@@ -143,6 +144,7 @@ function seedable(rel: string): boolean {
   const name = rel.slice(CACHE_DIR.length + 1);
   return (
     name === ASK_INDEX_FILE ||
+    name === MEANING_SOURCE_CACHE_FILE ||
     name.startsWith(`${EXTRACT_CACHE_PREFIX}.`) ||
     name.startsWith(`${FINGERPRINT_PREFIX}.`)
   );
