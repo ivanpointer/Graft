@@ -61,7 +61,8 @@ export async function recordGraftConfiguration(
   config: EngineConfig = {}, home?: string, env: NodeJS.ProcessEnv = process.env,
 ): Promise<string | null> {
   const resolved = resolveConfig(config);
-  const host = env.CODEX_SESSION_ID ? 'codex' : env.CLAUDE_SESSION_ID ? 'claude-code' : env.CURSOR_SESSION_ID ? 'cursor' : undefined;
+  const host = text(env.GRAFT_HARNESS_HOST)
+    ?? (env.CODEX_SESSION_ID ? 'codex' : env.CLAUDE_SESSION_ID ? 'claude-code' : env.CURSOR_SESSION_ID ? 'cursor' : undefined);
   const harness = harnessDimensions(host, undefined, env);
   return recordConfigurationSnapshot({
     domain: 'graft',
