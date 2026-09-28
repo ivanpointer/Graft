@@ -50,7 +50,8 @@ test('Gemini AfterTool links only a Graft result marker; model and effort stay u
   const id = await recordInvocation({ command: 'graft_find_code', surface: 'mcp', savedTokens: 37 }, home);
   assert.ok(id);
   const base = { hook_event_name: 'AfterTool', session_id: 'gemini-session', cwd: '/repo',
-    tool_name: 'mcp_graft_graft_find_code', tool_input: {} };
+    tool_name: 'mcp_graft_graft_find_code', tool_input: {},
+    llm_request: { model: 'unjoined-before-model' }, model: 'unjoined-model', effort: 'high' };
   const marker = `[graft] invocation_id=${id}`;
   assert.equal(await observeGeminiAfterTool({ ...base, tool_response: {
     llmContent: [{ type: 'text', text: `answer\n${marker}\n` }], returnDisplay: `answer\n${marker}`,
@@ -61,9 +62,10 @@ test('Gemini AfterTool links only a Graft result marker; model and effort stay u
   assert.equal(await observeGeminiAfterTool({ ...base, tool_response: { llmContent: `${marker}\n[graft] invocation_id=00000000-0000-0000-0000-000000000000` } }, home), null);
 
   const db = new DatabaseSync(statsPath(home));
-  const facts = db.prepare('SELECT invocation_id, saved_tokens, config_snapshot_id FROM tool_observations').all() as any[];
+  const facts = db.prepare('SELECT invocation_id, session_id, saved_tokens, config_snapshot_id FROM tool_observations').all() as any[];
   assert.equal(facts.length, 1, 'same invocation is deduplicated');
   assert.equal(facts[0].invocation_id, id);
+  assert.equal(facts[0].session_id, 'gemini-session');
   assert.equal(facts[0].saved_tokens, 0, 'savings are owned by the invocation');
   const snap = db.prepare('SELECT domain, harness_model, harness_reasoning_effort FROM config_snapshots WHERE id = ?')
     .get(facts[0].config_snapshot_id) as any;
@@ -72,4 +74,5 @@ test('Gemini AfterTool links only a Graft result marker; model and effort stay u
   const report = await readStatsReport({ home });
   assert.equal(report.savedTokens, 37, 'one invocation contributes savings once');
   assert.equal(report.modelEfforts[0].model, 'unknown');
+  assert.equal(report.modelEfforts[0].reasoningEffort, 'unknown');
 });
