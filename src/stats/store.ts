@@ -33,7 +33,36 @@ export interface Invocation {
 }
 
 /** The latest local schema revision. Migrations are additive and idempotent. */
-export const STATS_SCHEMA_VERSION = 7;
+export const STATS_SCHEMA_VERSION = 8;
+
+export type GraphBuildPhase = 'enumerate' | 'prepare' | 'extract' | 'resolve' | 'enrich' | 'write';
+
+/** One row per actual buildGraph attempt; counts are snapshots of the selected source set. */
+export interface GraphBuildFact {
+  repo: string;
+  trigger: 'direct' | 'auto-refresh';
+  mode: 'cold' | 'incremental' | 'reuse';
+  graphOnly: boolean;
+  outcome: 'ok' | 'partial' | 'failed';
+  sourceFileCount?: number;
+  sourceBytes?: number;
+  parsedCount?: number;
+  reusedCount?: number;
+  nodeCount?: number;
+  edgeCount?: number;
+  errorCount?: number;
+  durationMs: number;
+  phases: Partial<Record<GraphBuildPhase, number>>;
+  occurredAt?: string;
+}
+
+export interface GraphBuildReport {
+  attempts: number;
+  completed: number;
+  failed: number;
+  avgDurationMs: number;
+  latest: GraphBuildFact | null;
+}
 
 export interface ConfigurationSnapshot {
   /** `graft`, `harness`, or `jev`; keeps independent setting namespaces distinct. */
@@ -311,6 +340,26 @@ function migration7(db: DatabaseSync): void {
   `);
 }
 
+function migration8(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS graph_builds (
+      id TEXT PRIMARY KEY, occurred_at TEXT NOT NULL, repo_path TEXT NOT NULL,
+      trigger TEXT NOT NULL CHECK (trigger IN ('direct', 'auto-refresh')),
+      mode TEXT NOT NULL CHECK (mode IN ('cold', 'incremental', 'reuse')),
+      graph_only INTEGER NOT NULL, outcome TEXT NOT NULL CHECK (outcome IN ('ok', 'partial', 'failed')),
+      source_file_count INTEGER, source_bytes INTEGER, parsed_count INTEGER, reused_count INTEGER,
+      node_count INTEGER, edge_count INTEGER, error_count INTEGER, duration_ms REAL NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS graph_builds_repo_time ON graph_builds(repo_path, occurred_at);
+    CREATE INDEX IF NOT EXISTS graph_builds_time ON graph_builds(occurred_at);
+    CREATE TABLE IF NOT EXISTS graph_build_phases (
+      build_id TEXT NOT NULL REFERENCES graph_builds(id) ON DELETE CASCADE,
+      phase TEXT NOT NULL CHECK (phase IN ('enumerate', 'prepare', 'extract', 'resolve', 'enrich', 'write')),
+      duration_ms REAL NOT NULL, PRIMARY KEY (build_id, phase)
+    );
+  `);
+}
+
 interface MigrationContext { db: DatabaseSync; }
 
 /** Umzug storage backed by the same local SQLite database we are migrating. */
@@ -333,7 +382,7 @@ class SqliteMigrationStorage implements UmzugStorage<MigrationContext> {
   }
 }
 
-const MIGRATIONS = [migration1, migration2, migration3, migration4, migration5, migration6, migration7].map((up, index) => ({
+const MIGRATIONS = [migration1, migration2, migration3, migration4, migration5, migration6, migration7, migration8].map((up, index) => ({
   name: `${String(index + 1).padStart(3, '0')}-stats-schema`,
   up: async ({ context }: MigrationParams<MigrationContext>) => {
     context.db.exec('BEGIN IMMEDIATE');
@@ -410,6 +459,87 @@ export async function recordInvocation(invocation: Invocation, home?: string): P
     // Stats must never affect a Graft command.
     return null;
   }
+}
+
+/** Best-effort, independent of invocation and Jev decision facts. */
+export async function recordGraphBuild(fact: GraphBuildFact, home?: string): Promise<void> {
+  try {
+    await withDatabase(home, (db) => {
+      const id = randomUUID();
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        db.prepare(`
+          INSERT INTO graph_builds (
+            id, occurred_at, repo_path, trigger, mode, graph_only, outcome,
+            source_file_count, source_bytes, parsed_count, reused_count,
+            node_count, edge_count, error_count, duration_ms
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          id, fact.occurredAt ?? new Date().toISOString(), fact.repo, fact.trigger, fact.mode,
+          Number(fact.graphOnly), fact.outcome, nonNegative(fact.sourceFileCount), nonNegative(fact.sourceBytes),
+          nonNegative(fact.parsedCount), nonNegative(fact.reusedCount), nonNegative(fact.nodeCount),
+          nonNegative(fact.edgeCount), nonNegative(fact.errorCount), Math.max(0, fact.durationMs),
+        );
+        const insertPhase = db.prepare('INSERT INTO graph_build_phases (build_id, phase, duration_ms) VALUES (?, ?, ?)');
+        for (const phase of ['enumerate', 'prepare', 'extract', 'resolve', 'enrich', 'write'] as const) {
+          const duration = fact.phases[phase];
+          if (duration !== undefined && Number.isFinite(duration)) insertPhase.run(id, phase, Math.max(0, duration));
+        }
+        db.exec('COMMIT');
+      } catch (error) {
+        db.exec('ROLLBACK');
+        throw error;
+      }
+    });
+  } catch { /* Graph construction must never depend on local reporting. */ }
+}
+
+/** Compact machine-local graph trend, independently filterable from invocation stats. */
+export async function readGraphBuildReport(opts: { sinceDays?: number; repo?: string; home?: string } = {}): Promise<GraphBuildReport> {
+  const empty: GraphBuildReport = { attempts: 0, completed: 0, failed: 0, avgDurationMs: 0, latest: null };
+  try {
+    return await withDatabase(opts.home, (db) => {
+      const filters: string[] = [];
+      const args: Array<string> = [];
+      if (opts.sinceDays !== undefined) {
+        filters.push('occurred_at >= ?');
+        args.push(new Date(Date.now() - Math.max(0, opts.sinceDays) * 86_400_000).toISOString());
+      }
+      if (opts.repo !== undefined) { filters.push('repo_path = ?'); args.push(opts.repo); }
+      const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
+      const totals = db.prepare(`
+        SELECT COUNT(*) AS attempts, SUM(outcome != 'failed') AS completed,
+               SUM(outcome = 'failed') AS failed, AVG(duration_ms) AS avgDurationMs
+        FROM graph_builds ${where}
+      `).get(...args) as Record<string, unknown>;
+      const row = db.prepare(`
+        SELECT id, occurred_at, repo_path, trigger, mode, graph_only, outcome,
+               source_file_count, source_bytes, parsed_count, reused_count,
+               node_count, edge_count, error_count, duration_ms
+        FROM graph_builds ${where} ORDER BY occurred_at DESC, rowid DESC LIMIT 1
+      `).get(...args) as Record<string, unknown> | undefined;
+      const optional = (value: unknown) => value === null || value === undefined ? undefined : Number(value);
+      const phases: GraphBuildFact['phases'] = {};
+      if (row) {
+        const timingRows = db.prepare('SELECT phase, duration_ms FROM graph_build_phases WHERE build_id = ?')
+          .all(String(row.id)) as Array<{ phase: GraphBuildPhase; duration_ms: number }>;
+        for (const timing of timingRows) phases[timing.phase] = timing.duration_ms;
+      }
+      return {
+        attempts: Number(totals.attempts), completed: Number(totals.completed ?? 0),
+        failed: Number(totals.failed ?? 0), avgDurationMs: Number(totals.avgDurationMs ?? 0),
+        latest: row ? {
+          occurredAt: String(row.occurred_at), repo: String(row.repo_path),
+          trigger: row.trigger as GraphBuildFact['trigger'], mode: row.mode as GraphBuildFact['mode'],
+          graphOnly: Boolean(row.graph_only), outcome: row.outcome as GraphBuildFact['outcome'],
+          sourceFileCount: optional(row.source_file_count), sourceBytes: optional(row.source_bytes),
+          parsedCount: optional(row.parsed_count), reusedCount: optional(row.reused_count),
+          nodeCount: optional(row.node_count), edgeCount: optional(row.edge_count),
+          errorCount: optional(row.error_count), durationMs: Number(row.duration_ms), phases,
+        } : null,
+      };
+    });
+  } catch { return empty; }
 }
 
 /** Stable JSON prevents semantically identical settings from fragmenting reports. */

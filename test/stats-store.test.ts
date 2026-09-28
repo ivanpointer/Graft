@@ -7,10 +7,12 @@ import { DatabaseSync } from 'node:sqlite';
 import {
   STATS_SCHEMA_VERSION,
   formatStatsReport,
+  readGraphBuildReport,
   readStatsReport,
   recordConfigurationSnapshot,
   recordDecisionRun,
   recordHookRun,
+  recordGraphBuild,
   recordInvocation,
   recordSessionRollup,
   recordToolObservation,
@@ -192,4 +194,31 @@ test('Umzug migrations retain legacy calls and record the unified fact model', a
   assert.equal((db.prepare('SELECT reuse_applied FROM decision_items WHERE item_key = ?').get('s0') as { reuse_applied: number }).reuse_applied, 1);
   assert.equal((db.prepare('SELECT COUNT(*) AS n FROM session_rollups').get() as { n: number }).n, 1);
   db.close();
+});
+
+test('v7 machine database upgrades to graph build facts without losing existing usage', async () => {
+  const home = freshHome();
+  await recordInvocation({ command: 'ask', surface: 'cli', repo: '/work/alpha', savedTokens: 100 }, home);
+  const db = new DatabaseSync(statsPath(home));
+  db.exec(`
+    DROP TABLE graph_build_phases;
+    DROP TABLE graph_builds;
+    DELETE FROM schema_migrations WHERE name = '008-stats-schema';
+  `);
+  db.close();
+
+  await recordGraphBuild({
+    repo: '/work/alpha', trigger: 'direct', mode: 'cold', graphOnly: false, outcome: 'ok',
+    sourceFileCount: 3, sourceBytes: 123, parsedCount: 3, reusedCount: 0,
+    nodeCount: 8, edgeCount: 7, errorCount: 0, durationMs: 15.5,
+    phases: { enumerate: 2.5, extract: 8 },
+  }, home);
+  assert.equal((await readStatsReport({ home })).savedTokens, 100);
+  const report = await readGraphBuildReport({ home });
+  assert.equal(report.attempts, 1);
+  assert.equal(report.latest?.sourceBytes, 123);
+  assert.equal(report.latest?.phases.extract, 8);
+  const upgraded = new DatabaseSync(statsPath(home), { readOnly: true });
+  assert.equal((upgraded.prepare('SELECT COUNT(*) AS n FROM schema_migrations').get() as { n: number }).n, STATS_SCHEMA_VERSION);
+  upgraded.close();
 });
