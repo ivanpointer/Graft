@@ -72,15 +72,12 @@ export interface ToolObservation {
   /** Host identifiers for retry-safe tool-use observations. */
   turnId?: string;
   toolUseId?: string;
-  /** Observed coding-host metadata, never Graft's configured LLM defaults. */
-  provider?: string;
-  model?: string;
-  reasoningEffort?: string;
-  /** Provenance required before model/effort is used in reports. */
+  /** Provenance required before a linked host snapshot is used in reports. */
   metadataSource?: 'host-payload' | 'host-transcript';
   /** Adoption signal only; savings remain authoritative on `invocations`. */
   kind: 'graft' | 'source';
   savedTokens?: number;
+  /** Per-tool host snapshot; invocation snapshots describe Graft itself. */
   configSnapshotId?: string;
   occurredAt?: string;
 }
@@ -304,9 +301,6 @@ function migration7(db: DatabaseSync): void {
   addColumn(db, 'tool_observations', 'invocation_id', 'TEXT REFERENCES invocations(id)');
   addColumn(db, 'tool_observations', 'turn_id', 'TEXT');
   addColumn(db, 'tool_observations', 'tool_use_id', 'TEXT');
-  addColumn(db, 'tool_observations', 'observed_provider', 'TEXT');
-  addColumn(db, 'tool_observations', 'observed_model', 'TEXT');
-  addColumn(db, 'tool_observations', 'observed_reasoning_effort', 'TEXT');
   addColumn(db, 'tool_observations', 'metadata_source', 'TEXT');
   db.exec(`
     CREATE UNIQUE INDEX IF NOT EXISTS tool_observations_invocation_id
@@ -508,17 +502,13 @@ export async function recordToolObservation(observation: ToolObservation, home?:
       db.prepare(`
         INSERT OR IGNORE INTO tool_observations (
           id, occurred_at, repo_path, session_id, host, kind, saved_tokens, config_snapshot_id,
-          invocation_id, turn_id, tool_use_id, observed_provider, observed_model,
-          observed_reasoning_effort, metadata_source
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          invocation_id, turn_id, tool_use_id, metadata_source
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         randomUUID(), observation.occurredAt ?? new Date().toISOString(), observation.repo ?? null,
         cleanText(observation.sessionId ?? sessionIdFromEnvironment(), 512), cleanText(observation.host, 96),
         observation.kind, Math.max(0, nonNegative(observation.savedTokens) ?? 0), observation.configSnapshotId ?? null,
         cleanText(observation.invocationId, 64), cleanText(observation.turnId, 512), cleanText(observation.toolUseId, 512),
-        metadataSource ? cleanText(observation.provider, 96) : null,
-        metadataSource ? cleanText(observation.model, 256) : null,
-        metadataSource ? cleanText(observation.reasoningEffort, 96) : null,
         metadataSource,
       );
     });
@@ -622,18 +612,19 @@ export async function readStatsReport(opts: { sinceDays?: number; home?: string 
       `).all(...args) as Array<Record<string, unknown>>;
       const dimensionWhere = since ? 'WHERE i.occurred_at >= ?' : '';
       const dimensions = db.prepare(`
-        SELECT COALESCE(NULLIF(o.observed_provider, ''), 'unknown') AS provider,
-               COALESCE(NULLIF(o.observed_model, ''), 'unknown') AS model,
-               COALESCE(NULLIF(o.observed_reasoning_effort, ''), 'unknown') AS reasoningEffort,
+        SELECT COALESCE(NULLIF(c.harness_provider, ''), 'unknown') AS provider,
+               COALESCE(NULLIF(c.harness_model, ''), 'unknown') AS model,
+               COALESCE(NULLIF(c.harness_reasoning_effort, ''), 'unknown') AS reasoningEffort,
                COUNT(*) AS calls, COALESCE(SUM(i.saved_tokens), 0) AS savedTokens
         FROM invocations i
         LEFT JOIN tool_observations o ON o.invocation_id = i.id AND o.kind = 'graft'
           AND o.metadata_source IN ('host-payload', 'host-transcript')
+        LEFT JOIN config_snapshots c ON c.id = o.config_snapshot_id AND c.domain = 'harness'
         ${dimensionWhere}
         GROUP BY
-          COALESCE(NULLIF(o.observed_provider, ''), 'unknown'),
-          COALESCE(NULLIF(o.observed_model, ''), 'unknown'),
-          COALESCE(NULLIF(o.observed_reasoning_effort, ''), 'unknown')
+          COALESCE(NULLIF(c.harness_provider, ''), 'unknown'),
+          COALESCE(NULLIF(c.harness_model, ''), 'unknown'),
+          COALESCE(NULLIF(c.harness_reasoning_effort, ''), 'unknown')
       `).all(...args) as Array<Record<string, unknown>>;
       const calls = Number(totals.calls ?? 0);
       const savedTokens = Number(totals.savedTokens ?? 0);

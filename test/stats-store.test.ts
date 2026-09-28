@@ -48,30 +48,40 @@ test('machine stats attribute invocation savings only to correlated, observed ho
     domain: 'graft', schemaVersion: 1, settings: { model: 'configured-graft-model' },
     dimensions: { harness: { provider: 'configured', model: 'not-observed', reasoningEffort: 'high' } },
   }, home);
+  const hostSnapshot = await recordConfigurationSnapshot({
+    domain: 'harness', schemaVersion: 1,
+    settings: { host: 'codex', provider: 'openai', model: 'observed-host-model', reasoningEffort: 'medium' },
+    dimensions: { harness: { host: 'codex', provider: 'openai', model: 'observed-host-model', reasoningEffort: 'medium' } },
+  }, home);
   assert.ok(snapshot);
+  assert.ok(hostSnapshot);
   const invocationId = await recordInvocation({ command: 'ask', surface: 'cli', savedTokens: 700, configSnapshotId: snapshot! }, home);
   assert.match(invocationId!, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
   await recordToolObservation({
     host: 'codex', sessionId: 's1', turnId: 't1', toolUseId: 'u1', kind: 'graft',
-    invocationId: invocationId!, savedTokens: 700, provider: 'openai', model: 'observed-host-model',
-    reasoningEffort: 'medium', metadataSource: 'host-payload',
+    invocationId: invocationId!, savedTokens: 700, configSnapshotId: hostSnapshot!, metadataSource: 'host-payload',
   }, home);
   await recordToolObservation({
     host: 'codex', sessionId: 's1', turnId: 't1', toolUseId: 'u1', kind: 'graft',
-    invocationId: invocationId!, savedTokens: 700, metadataSource: 'host-payload', model: 'retry',
+    invocationId: invocationId!, savedTokens: 700, configSnapshotId: hostSnapshot!, metadataSource: 'host-payload',
   }, home);
   await recordToolObservation({
     host: 'codex', sessionId: 's1', turnId: 't1', toolUseId: 'u2', kind: 'graft',
-    invocationId: invocationId!, savedTokens: 700, metadataSource: 'host-payload', model: 'retry',
+    invocationId: invocationId!, savedTokens: 700, configSnapshotId: hostSnapshot!, metadataSource: 'host-payload',
   }, home);
   const otherInvocationId = await recordInvocation({ command: 'map', surface: 'mcp', savedTokens: 300 }, home);
   await recordToolObservation({
     host: 'codex', kind: 'graft', invocationId: otherInvocationId!, toolUseId: 'u4',
-    model: 'unproven-model',
+    configSnapshotId: hostSnapshot!,
   }, home);
   await recordToolObservation({
     host: 'codex', sessionId: 's1', toolUseId: 'u3', kind: 'graft',
-    metadataSource: 'host-payload', model: 'unlinked-host-model',
+    metadataSource: 'host-payload', configSnapshotId: hostSnapshot!,
+  }, home);
+  const wrongDomainId = await recordInvocation({ command: 'grep', surface: 'cli', savedTokens: 100 }, home);
+  await recordToolObservation({
+    host: 'codex', toolUseId: 'u5', kind: 'graft', invocationId: wrongDomainId!,
+    metadataSource: 'host-payload', configSnapshotId: snapshot!,
   }, home);
   await recordToolObservation({ host: 'cursor', toolUseId: 'source-1', kind: 'source' }, home);
   await recordToolObservation({ host: 'cursor', toolUseId: 'source-1', kind: 'source' }, home);
@@ -79,11 +89,13 @@ test('machine stats attribute invocation savings only to correlated, observed ho
   const report = await readStatsReport({ home });
   assert.deepEqual(report.modelEfforts, [
     { provider: 'openai', model: 'observed-host-model', reasoningEffort: 'medium', calls: 1, savedTokens: 700 },
-    { provider: 'unknown', model: 'unknown', reasoningEffort: 'unknown', calls: 1, savedTokens: 300 },
+    { provider: 'unknown', model: 'unknown', reasoningEffort: 'unknown', calls: 2, savedTokens: 400 },
   ]);
-  assert.equal(report.savedTokens, 1000, 'host observation savings are never added to invocation savings');
+  assert.equal(report.savedTokens, 1100, 'host observation savings are never added to invocation savings');
   const db = new DatabaseSync(statsPath(home), { readOnly: true });
-  assert.equal((db.prepare('SELECT COUNT(*) AS n FROM tool_observations').get() as { n: number }).n, 4);
+  assert.equal((db.prepare('SELECT COUNT(*) AS n FROM tool_observations').get() as { n: number }).n, 5);
+  const columns = (db.prepare('PRAGMA table_info(tool_observations)').all() as Array<{ name: string }>).map((row) => row.name);
+  assert.ok(!columns.some((column) => column.startsWith('observed_')), 'host dimensions live only in config_snapshots');
   db.close();
 });
 
