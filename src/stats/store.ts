@@ -9,8 +9,8 @@
  */
 import { DatabaseSync } from 'node:sqlite';
 import { homedir } from 'node:os';
-import { basename, dirname, isAbsolute, join } from 'node:path';
-import { chmodSync, copyFileSync, existsSync, mkdirSync, renameSync, statSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
+import { chmodSync, mkdirSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 
 export interface Invocation {
@@ -45,18 +45,6 @@ export function statsPath(home: string = homedir()): string {
   return join(home, '.graft', 'stats', 'v1.sqlite3');
 }
 
-const BACKUP_INTERVAL_MS = 5 * 60 * 1000;
-
-/**
- * A backup destination is deliberately configuration, not a hard-coded cloud
- * provider.  It lets a managed machine choose an encrypted/synced location
- * without ever uploading telemetry from Graft itself.
- */
-function statsBackupDir(): string | undefined {
-  const dir = process.env.GRAFT_STATS_BACKUP_DIR?.trim();
-  return dir && isAbsolute(dir) ? dir : undefined;
-}
-
 function sessionIdFromEnvironment(): string | undefined {
   const value = process.env.GRAFT_SESSION_ID
     ?? process.env.CLAUDE_SESSION_ID
@@ -65,21 +53,9 @@ function sessionIdFromEnvironment(): string | undefined {
   return value && value.length <= 512 ? value : undefined;
 }
 
-function restoreFromBackup(path: string): void {
-  const backupDir = statsBackupDir();
-  const backup = backupDir ? join(backupDir, 'v1.sqlite3') : undefined;
-  if (!backup || existsSync(path) || !existsSync(backup)) return;
-  try {
-    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-    copyFileSync(backup, path);
-    chmodSync(path, 0o600);
-  } catch { /* a missing or unreadable backup must not affect a query */ }
-}
-
 function open(home?: string): DatabaseSync {
   const path = statsPath(home);
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  restoreFromBackup(path);
   const db = new DatabaseSync(path);
   // SQLite creates the file using the process umask. Tighten it explicitly so
   // a local report that includes repository paths is never world-readable.
@@ -117,44 +93,8 @@ function open(home?: string): DatabaseSync {
   return db;
 }
 
-/** Atomically checkpoint and copy the database to the configured private backup. */
-export function backupStats(home?: string): boolean {
-  const backupDir = statsBackupDir();
-  if (!backupDir) return false;
-  try {
-    const db = open(home);
-    try {
-      db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
-    } finally {
-      db.close();
-    }
-    const source = statsPath(home);
-    if (!existsSync(source)) return false;
-    mkdirSync(backupDir, { recursive: true, mode: 0o700 });
-    const target = join(backupDir, 'v1.sqlite3');
-    const temporary = join(backupDir, `.v1.sqlite3-${randomUUID()}.tmp`);
-    copyFileSync(source, temporary);
-    chmodSync(temporary, 0o600);
-    renameSync(temporary, target);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function maybeBackupStats(home?: string): void {
-  const backupDir = statsBackupDir();
-  if (!backupDir) return;
-  try {
-    const target = join(backupDir, 'v1.sqlite3');
-    if (existsSync(target) && Date.now() - statSync(target).mtimeMs < BACKUP_INTERVAL_MS) return;
-  } catch { /* attempt the backup below */ }
-  backupStats(home);
-}
-
 /** Persist one exact local observation. Never throws. */
 export function recordInvocation(invocation: Invocation, home?: string): void {
-  let recorded = false;
   try {
     const db = open(home);
     try {
@@ -174,12 +114,10 @@ export function recordInvocation(invocation: Invocation, home?: string): void {
         invocation.outputTokens === undefined ? null : Math.max(0, Math.round(invocation.outputTokens)),
         invocation.sourceFiles === undefined ? null : Math.max(0, Math.round(invocation.sourceFiles)),
       );
-      recorded = true;
     } finally {
       db.close();
     }
   } catch { /* stats must never affect a graft command */ }
-  if (recorded) maybeBackupStats(home);
 }
 
 /** Read a compact aggregate suitable for a terminal report. Never throws. */

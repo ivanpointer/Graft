@@ -85,7 +85,7 @@ import { normalizePathPrefix } from "./util/paths.js";
 import { latestSession, formatSessionStats, sessionInputRate } from "./claude/session-metrics.js";
 import { setInputRate } from "./context/savings.js";
 import { beginInvocation, setInvocationRepo, takeInvocation } from "./stats/current.js";
-import { backupStats, formatStatsReport, readStatsReport, recordInvocation } from "./stats/store.js";
+import { formatStatsReport, readStatsReport, recordInvocation } from "./stats/store.js";
 import { formatUpdateNudge, maybeRefreshInBackground, readStamp, readUpdateCache, refreshUpdateCache, wiredHostIds, writeStamp } from "./upkeep.js";
 import {
   errorCode,
@@ -752,17 +752,11 @@ program
   .option("--json", "output the session stats as JSON")
   .option("--machine", "report exact machine-local Graft usage instead of the latest agent session")
   .option("--since <days>", "with --machine, include only the last N days")
-  .option("--backup", "with --machine, checkpoint the database to GRAFT_STATS_BACKUP_DIR")
-  .action((dirArg: string | undefined, opts: { json?: boolean; machine?: boolean; since?: string; backup?: boolean }) => {
+  .action((dirArg: string | undefined, opts: { json?: boolean; machine?: boolean; since?: string }) => {
     if (opts.machine) {
       const rawDays = opts.since === undefined ? undefined : Number(opts.since);
       if (rawDays !== undefined && (!Number.isFinite(rawDays) || rawDays < 0)) {
         console.error("✗ --since must be a non-negative number of days");
-        process.exitCode = 1;
-        return;
-      }
-      if (opts.backup && !backupStats()) {
-        console.error("✗ No stats backup was written; set an absolute GRAFT_STATS_BACKUP_DIR first");
         process.exitCode = 1;
         return;
       }
