@@ -1,4 +1,5 @@
-import { realpathSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { isAbsolute, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { ChatCruxSummarizer, type CruxSummarizer } from "./crux.js";
@@ -15,6 +16,7 @@ import {
   type EdgeDisambiguator,
   type MeaningValidator,
 } from "./decisions.js";
+import { recordConfigurationSnapshot, recordDecisionRun, type DecisionKind } from "../stats/store.js";
 
 export interface HookDefaults {
   chatModel(): ChatModel;
@@ -37,6 +39,11 @@ export interface HookContext {
 }
 
 export interface GraftHookModule {
+  /**
+   * Safe, declared tuning settings. This is intentionally explicit: Graft
+   * never serializes a hook's closure, environment, prompts, or credentials.
+   */
+  statsConfig?(context: HookContext): HookStatsConfig | Promise<HookStatsConfig>;
   chatModel?(context: HookContext): ChatModel | Promise<ChatModel>;
   summarizer?(context: HookContext): Summarizer | Promise<Summarizer>;
   cruxSummarizer?(context: HookContext): CruxSummarizer | Promise<CruxSummarizer>;
@@ -46,6 +53,113 @@ export interface GraftHookModule {
   edgeDisambiguator?(context: HookContext): EdgeDisambiguator | Promise<EdgeDisambiguator>;
   meaningValidator?(context: HookContext): MeaningValidator | Promise<MeaningValidator>;
   deepBuildRouter?(context: HookContext): DeepBuildRouter | Promise<DeepBuildRouter>;
+}
+
+export interface HookStatsConfig {
+  name: string;
+  schemaVersion: number;
+  settings: Record<string, unknown>;
+}
+
+interface DecisionObserver {
+  repo: string;
+  configSnapshotId?: string;
+  provider: string;
+  model: string;
+}
+
+function reportDecision(
+  observer: DecisionObserver,
+  kind: DecisionKind,
+  candidateCount: number,
+  startedAt: number,
+  items: Parameters<typeof recordDecisionRun>[0]['items'],
+  opts: { phase?: string; fallback?: boolean; outcome?: 'ok' | 'error' | 'fallback' } = {},
+): void {
+  void recordDecisionRun({
+    repo: observer.repo, configSnapshotId: observer.configSnapshotId, provider: observer.provider,
+    model: observer.model, kind, candidateCount, items, durationMs: Date.now() - startedAt,
+    phase: opts.phase, fallback: opts.fallback, outcome: opts.outcome,
+  });
+}
+
+function observeDecisionHooks(next: EngineConfig, hooks: GraftHookModule, observer: DecisionObserver): void {
+  if (hooks.askReranker && next.askReranker) {
+    const base = next.askReranker;
+    next.askReranker = { async rerank(input) {
+      const startedAt = Date.now();
+      try {
+        const decision = await base.rerank(input);
+        reportDecision(observer, 'ask-rerank', input.candidates.length, startedAt, input.candidates.map((candidate, index) => ({
+          key: candidate.key, inputRank: index + 1,
+          outputRank: decision.abstain ? undefined : (() => { const rank = decision.order.indexOf(candidate.key); return rank < 0 ? undefined : rank + 1; })(),
+          action: decision.abstain ? 'abstain' : decision.order.includes(candidate.key) ? 'selected' : 'not-selected',
+          confidence: decision.confidence, reasonCode: decision.abstain ? 'abstain' : undefined,
+        })));
+        return decision;
+      } catch (error) {
+        reportDecision(observer, 'ask-rerank', input.candidates.length, startedAt, [], { outcome: 'error', fallback: true });
+        throw error;
+      }
+    } };
+  }
+  if (hooks.cruxSelector && next.cruxSelector) {
+    const base = next.cruxSelector;
+    next.cruxSelector = { async select(input) {
+      const startedAt = Date.now();
+      try {
+        const decisions = await base.select(input);
+        const bySymbol = new Map(decisions.map((decision) => [decision.symbolKey, decision]));
+        reportDecision(observer, 'crux-select', input.symbols.reduce((n, symbol) => n + symbol.candidates.length, 0), startedAt,
+          input.symbols.map((symbol) => ({ key: symbol.key, action: bySymbol.get(symbol.key)?.candidateKey ?? 'none', confidence: bySymbol.get(symbol.key)?.confidence })));
+        return decisions;
+      } catch (error) { reportDecision(observer, 'crux-select', input.symbols.length, startedAt, [], { outcome: 'error', fallback: true }); throw error; }
+    } };
+  }
+  if (hooks.edgeDisambiguator && next.edgeDisambiguator) {
+    const base = next.edgeDisambiguator;
+    next.edgeDisambiguator = { async choose(input) {
+      const startedAt = Date.now();
+      try {
+        const decisions = await base.choose(input);
+        const byAmbiguity = new Map(decisions.map((decision) => [decision.ambiguityKey, decision]));
+        reportDecision(observer, 'edge-disambiguate', input.ambiguities.reduce((n, ambiguity) => n + ambiguity.candidates.length, 0), startedAt,
+          input.ambiguities.map((ambiguity) => ({ key: ambiguity.key, action: byAmbiguity.get(ambiguity.key)?.candidateKey ?? 'unresolved', confidence: byAmbiguity.get(ambiguity.key)?.confidence })));
+        return decisions;
+      } catch (error) { reportDecision(observer, 'edge-disambiguate', input.ambiguities.length, startedAt, [], { outcome: 'error', fallback: true }); throw error; }
+    } };
+  }
+  if (hooks.meaningValidator && next.meaningValidator) {
+    const base = next.meaningValidator;
+    next.meaningValidator = { async validate(input) {
+      const startedAt = Date.now();
+      try {
+        const decisions = await base.validate(input);
+        const byKey = new Map(decisions.map((decision) => [decision.key, decision]));
+        reportDecision(observer, 'meaning-validate', input.candidates.length, startedAt,
+          input.candidates.map((candidate) => ({ key: candidate.key, action: byKey.get(candidate.key)?.accept ? 'accept' : 'reject', confidence: byKey.get(candidate.key)?.confidence })));
+        return decisions;
+      } catch (error) { reportDecision(observer, 'meaning-validate', input.candidates.length, startedAt, [], { outcome: 'error', fallback: true }); throw error; }
+    } };
+  }
+  if (hooks.deepBuildRouter && next.deepBuildRouter) {
+    const base = next.deepBuildRouter;
+    next.deepBuildRouter = { async route(input) {
+      const startedAt = Date.now();
+      try {
+        const decisions = await base.route(input);
+        const byKey = new Map(decisions.map((decision) => [decision.key, decision]));
+        reportDecision(observer, 'deep-build-route', input.items.length, startedAt,
+          input.items.map((item) => {
+            const action = byKey.get(item.key)?.action ?? 'process';
+            return { key: item.key, action, confidence: byKey.get(item.key)?.confidence, hasPrior: !!item.prior,
+              reuseEligible: !!item.prior && !!input.capabilities?.symbolMeaningReuse,
+              reuseApplied: action === 'reuse' };
+          }), { phase: input.phase });
+        return decisions;
+      } catch (error) { reportDecision(observer, 'deep-build-route', input.items.length, startedAt, [], { phase: input.phase, outcome: 'error', fallback: true }); throw error; }
+    } };
+  }
 }
 
 function defaultChatModel(config: ResolvedConfig): ChatModel {
@@ -80,6 +194,7 @@ export async function applyHookModule(
   const absolute = resolve(cwd, hookPath);
   const hooks = (await import(pathToFileURL(absolute).href)) as GraftHookModule;
   const resolved = resolveConfig(config);
+  const moduleHash = createHash('sha256').update(readFileSync(absolute)).digest('hex');
   let builtInModel: ChatModel | undefined;
   let effectiveModel = config.chatModel;
   const model = () => {
@@ -104,6 +219,7 @@ export async function applyHookModule(
       deepBuildRouter: defaultDecisionHooks.deepBuildRouter,
     },
   };
+  const declared = hooks.statsConfig ? await hooks.statsConfig(context) : undefined;
 
   const next: EngineConfig = { ...config };
   if (hooks.chatModel) {
@@ -150,6 +266,16 @@ export async function applyHookModule(
       "route",
     );
   }
+  const configSnapshotId = await recordConfigurationSnapshot({
+    domain: 'jev', schemaVersion: 1,
+    settings: {
+      module: { sha256: moduleHash, name: declared?.name ?? 'undeclared', schemaVersion: declared?.schemaVersion ?? 0 },
+      settingsDeclared: declared?.settings ?? {},
+      enabled: ['askReranker', 'cruxSelector', 'edgeDisambiguator', 'meaningValidator', 'deepBuildRouter'].filter((name) => hooks[name as keyof GraftHookModule] !== undefined),
+      provider: resolved.provider, model: resolved.model,
+    },
+  });
+  observeDecisionHooks(next, hooks, { repo: cwd, configSnapshotId: configSnapshotId ?? undefined, provider: resolved.provider, model: resolved.model });
   return next;
 }
 

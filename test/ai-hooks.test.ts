@@ -4,7 +4,9 @@ import { mkdtempSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
+import { DatabaseSync } from "node:sqlite";
 import { applyHookModule, assertSafePersistedHook } from "../src/ai/hooks.js";
+import { statsPath } from "../src/stats/store.js";
 import { readBuildConfig } from "../src/util/state.js";
 import { tmpRepo } from "./helpers.js";
 
@@ -54,6 +56,36 @@ test("a hook module can export every bounded decision seam", async () => {
   assert.equal(typeof config.edgeDisambiguator?.choose, "function");
   assert.equal(typeof config.meaningValidator?.validate, "function");
   assert.equal(typeof config.deepBuildRouter?.route, "function");
+});
+
+test("a declared JEV settings snapshot and decisions are recorded centrally", async () => {
+  const dir = fresh("graft-hook-stats-");
+  const home = fresh("graft-hook-stats-home-");
+  const hook = join(dir, "hook.mjs");
+  writeFileSync(hook, `
+    export function statsConfig() { return { name: "jev", schemaVersion: 1, settings: { reuseThreshold: 0.92 } }; }
+    export function deepBuildRouter() { return { async route(input) { return input.items.map((item) => ({ key: item.key, action: "reuse", confidence: 0.92 })); } }; }
+  `);
+  const prior = process.env.GRAFT_STATS_HOME;
+  process.env.GRAFT_STATS_HOME = home;
+  try {
+    const config = await applyHookModule({}, hook, dir);
+    await config.deepBuildRouter?.route({
+      phase: "symbol-meaning", path: "src/a.ts", capabilities: { symbolMeaningReuse: "exact-crux-remap" },
+      items: [{ key: "s0", source: "const a = 1", contentHash: "a", prior: { contentHash: "old", value: "old" } }],
+    });
+    // The recorder is deliberately non-blocking; permit its queued local write
+    // to settle before inspecting the test-only database.
+    await new Promise((resolve) => setImmediate(resolve));
+    const db = new DatabaseSync(statsPath(home), { readOnly: true });
+    assert.equal((db.prepare('SELECT COUNT(*) AS n FROM config_snapshots').get() as { n: number }).n, 1);
+    assert.equal((db.prepare('SELECT action FROM decision_items').get() as { action: string }).action, 'reuse');
+    assert.equal((db.prepare('SELECT reuse_applied FROM decision_items').get() as { reuse_applied: number }).reuse_applied, 1);
+    db.close();
+  } finally {
+    if (prior === undefined) delete process.env.GRAFT_STATS_HOME;
+    else process.env.GRAFT_STATS_HOME = prior;
+  }
 });
 
 test("a chatModel hook becomes the transport used by default component factories", async () => {
