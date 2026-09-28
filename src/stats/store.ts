@@ -128,7 +128,7 @@ export interface StatsReport {
   commands: Array<{ command: string; calls: number; savedTokens: number }>;
 }
 
-export function statsPath(home: string = homedir()): string {
+export function statsPath(home: string = process.env.GRAFT_STATS_HOME ?? homedir()): string {
   return join(home, '.graft', 'stats', 'v1.sqlite3');
 }
 
