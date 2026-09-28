@@ -6,9 +6,6 @@
  */
 import { resolveConfig, type EngineConfig } from '../ai/providers.js';
 import { recordConfigurationSnapshot } from './store.js';
-import { readFileSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
 
 const CONFIG_SCHEMA_VERSION = 1;
 
@@ -18,41 +15,31 @@ function text(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim().length > 0 && value.length <= 256 ? value.trim() : undefined;
 }
 
-function payloadDimensions(input: unknown): Partial<HarnessDimensions> {
+function payloadDimensions(host: string | undefined, input: unknown): Partial<HarnessDimensions> {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return {};
   const value = input as Record<string, unknown>;
-  const agent = value.agent && typeof value.agent === 'object' ? value.agent as Record<string, unknown> : {};
-  const thinking = value.thinking && typeof value.thinking === 'object' ? value.thinking as Record<string, unknown> : {};
-  return {
-    provider: text(value.provider) ?? text(agent.provider),
-    model: text(value.model) ?? text(value.model_id) ?? text(agent.model),
-    reasoningEffort: text(value.reasoning_effort) ?? text(value.model_reasoning_effort)
-      ?? text(value.effort) ?? text(agent.reasoning_effort) ?? text(thinking.effort),
-  };
-}
-
-function codexDimensions(env: NodeJS.ProcessEnv): Partial<HarnessDimensions> {
-  try {
-    const config = readFileSync(
-      env.CODEX_HOME ? join(env.CODEX_HOME, 'config.toml') : join(homedir(), '.codex', 'config.toml'),
-      'utf8',
-    );
-    return {
-      provider: 'openai',
-      model: text(/^model\s*=\s*"([^"]+)"/m.exec(config)?.[1]),
-      reasoningEffort: text(/^model_reasoning_effort\s*=\s*"([^"]+)"/m.exec(config)?.[1]),
-    };
-  } catch { return {}; }
+  if (host === 'codex') return { model: text(value.model) };
+  if (host === 'claude-code') {
+    const effort = value.effort && typeof value.effort === 'object' && !Array.isArray(value.effort)
+      ? value.effort as Record<string, unknown> : {};
+    return { model: text(value.model), reasoningEffort: text(effort.level) };
+  }
+  if (host === 'cursor') {
+    const params = Array.isArray(value.model_params) ? value.model_params : [];
+    const effort = params.find((item: unknown) => item && typeof item === 'object'
+      && (item as Record<string, unknown>).id === 'effort') as Record<string, unknown> | undefined;
+    return { model: text(value.model_id) ?? text(value.model), reasoningEffort: text(effort?.value) };
+  }
+  return {};
 }
 
 /** Host-scoped metadata only: no shared machine default is ever consulted. */
-function harnessDimensions(host: string | undefined, input: unknown, env: NodeJS.ProcessEnv): HarnessDimensions {
-  const native = host === 'codex' ? codexDimensions(env) : {};
-  const observed = payloadDimensions(input);
+export function harnessDimensions(host: string | undefined, input: unknown): HarnessDimensions {
+  const observed = payloadDimensions(host, input);
   return {
-    provider: observed.provider ?? native.provider ?? 'unknown',
-    model: observed.model ?? native.model ?? 'unknown',
-    reasoningEffort: observed.reasoningEffort ?? native.reasoningEffort ?? 'unknown',
+    provider: observed.provider ?? 'unknown',
+    model: observed.model ?? 'unknown',
+    reasoningEffort: observed.reasoningEffort ?? 'unknown',
   };
 }
 
@@ -63,7 +50,7 @@ export async function recordGraftConfiguration(
   const resolved = resolveConfig(config);
   const host = text(env.GRAFT_HARNESS_HOST)
     ?? (env.CODEX_SESSION_ID ? 'codex' : env.CLAUDE_SESSION_ID ? 'claude-code' : env.CURSOR_SESSION_ID ? 'cursor' : undefined);
-  const harness = harnessDimensions(host, undefined, env);
+  const harness = harnessDimensions(host, undefined);
   return recordConfigurationSnapshot({
     domain: 'graft',
     schemaVersion: CONFIG_SCHEMA_VERSION,
@@ -93,7 +80,7 @@ export async function recordHarnessConfiguration(
   home?: string,
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<string | null> {
-  const harness = harnessDimensions(host, input, env);
+  const harness = harnessDimensions(host, input);
   return recordConfigurationSnapshot({
     domain: 'harness',
     schemaVersion: CONFIG_SCHEMA_VERSION,

@@ -13,8 +13,95 @@ import { flushClosedSessions, summarizeSession } from '../telemetry/sessions.js'
 import { hasSavingsTally, lastAssistantTurn, lastTurnBilling } from './tally.js';
 import { scopeOf, scopesOfGraph } from '../graph/scopes.js';
 import { classifyToolUse, isMcpToolName, isGraftMcpTool, parseSavings, recordToolUse, type ToolKind } from './session-metrics.js';
-import { recordHookRun } from '../stats/store.js';
+import { recordHookRun, recordToolObservation } from '../stats/store.js';
 import { recordHarnessConfiguration } from '../stats/config.js';
+
+const INVOCATION_ID = /\[graft\] invocation_id=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?![0-9a-f-])/gi;
+
+/** Inspect only a tool's returned value, never its command or surrounding hook input. */
+export function invocationIdFromResponse(response: unknown): string | undefined {
+  const ids = new Set<string>();
+  const seen = new Set<object>();
+  function visit(value: unknown, depth: number): void {
+    if (depth > 8 || ids.size > 1) return;
+    if (typeof value === 'string') {
+      for (const match of value.matchAll(INVOCATION_ID)) ids.add(match[1].toLowerCase());
+      return;
+    }
+    if (!value || typeof value !== 'object' || seen.has(value)) return;
+    seen.add(value);
+    if (Array.isArray(value)) { for (const item of value) visit(item, depth + 1); return; }
+    for (const item of Object.values(value)) visit(item, depth + 1);
+  }
+  visit(response, 0);
+  return ids.size === 1 ? [...ids][0] : undefined;
+}
+
+type ObservedToolMetadata = {
+  invocationId?: string;
+  turnId?: string;
+  toolUseId?: string;
+  model?: string;
+  reasoningEffort?: string;
+  metadataSource?: 'host-payload';
+};
+
+function hostText(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() && value.length <= 512 ? value.trim() : undefined;
+}
+
+function currentClaudeModel(dir: string, sessionId: string): string | undefined {
+  return hostText((readSession(dir, sessionId) as { observedHostModel?: unknown }).observedHostModel);
+}
+
+function rememberClaudeModel(dir: string, sessionId: string, model: unknown): void {
+  const observedHostModel = hostText(model);
+  if (!observedHostModel) return;
+  writeSession(dir, sessionId, Object.assign(readSession(dir, sessionId), { observedHostModel }));
+}
+
+export function toolMetadata(input: any, host: 'codex' | 'claude-code' | 'cursor', dir: string, response: unknown): ObservedToolMetadata {
+  const invocationId = invocationIdFromResponse(response);
+  if (!invocationId) return {};
+  const model = host === 'claude-code' ? currentClaudeModel(dir, input?.session_id || 'default')
+    : hostText(host === 'cursor' ? input?.model_id ?? input?.model : input?.model);
+  const params = Array.isArray(input?.model_params) ? input.model_params : [];
+  const cursorEffort = params.find((item: any) => item?.id === 'effort')?.value;
+  const reasoningEffort = host === 'claude-code' ? hostText(input?.effort?.level)
+    : host === 'cursor' ? hostText(cursorEffort) : undefined;
+  return {
+    invocationId,
+    turnId: hostText(host === 'cursor' ? input?.generation_id : host === 'codex' ? input?.turn_id : input?.prompt_id),
+    toolUseId: hostText(input?.tool_use_id),
+    model,
+    reasoningEffort,
+    metadataSource: model || reasoningEffort ? 'host-payload' : undefined,
+  };
+}
+
+/** Preserve live adoption counters while writing exactly one correlated fact. */
+async function recordHostUse(
+  dir: string, sessionId: string, host: 'codex' | 'claude-code' | 'cursor',
+  use: { kind: ToolKind | null; savedTokens: number }, metadata: ObservedToolMetadata,
+  configSnapshotId?: string,
+): Promise<void> {
+  if (!metadata.invocationId || use.kind !== 'graft') {
+    await recordToolUse(dir, sessionId, { ...use, host: host as Parameters<typeof recordToolUse>[2]['host'] }, configSnapshotId);
+    return;
+  }
+  const id = sessionId || 'default';
+  const session = readSession(dir, id);
+  session.graftReads = (session.graftReads ?? 0) + 1;
+  if (use.savedTokens > 0) session.savedTokens = (session.savedTokens ?? 0) + use.savedTokens;
+  session.turnUsedGraft = true;
+  if (!session.host) Object.assign(session, { host });
+  writeSession(dir, id, session);
+  const observation = {
+    repo: dir, sessionId: id, host, kind: 'graft' as const, savedTokens: use.savedTokens,
+    configSnapshotId, ...metadata,
+  };
+  await recordToolObservation(observation);
+}
 
 /** Prompts shorter than this never trigger retrieval — they are almost always
  * conversational ("yes go ahead", "thanks") and the coverage gate can't judge
@@ -252,9 +339,12 @@ export function lastFileScopeHint(dir: string, lastFile: string | null | undefin
  * Write/Edit/unrelated-Bash majority: nothing to classify and no footer means
  * nothing is written.
  */
-async function handleToolUse(input: any, dir: string, configSnapshotId?: string): Promise<void> {
-  await recordToolUse(dir, input?.session_id || 'default',
-    { ...classifyAndScore(input?.tool_name, input?.tool_input?.command, () => input?.tool_response ?? input), host: 'claude-code' }, configSnapshotId);
+async function handleToolUse(input: any, dir: string, host: 'codex' | 'claude-code', configSnapshotId?: string): Promise<void> {
+  const response = input?.tool_response;
+  const scored = classifyAndScore(input?.tool_name, input?.tool_input?.command, () => response ?? input);
+  const metadata = classifyToolUse(input?.tool_name, input?.tool_input?.command) === 'graft'
+    ? toolMetadata(input, host, dir, response) : {};
+  await recordHostUse(dir, input?.session_id || 'default', host, scored, metadata, configSnapshotId);
 }
 
 /**
@@ -294,8 +384,11 @@ async function handleCursorPostTool(input: any, dir: string, configSnapshotId?: 
   const toolName = String(input?.tool_name ?? '');
   if (isMcpToolName(toolName) || isGraftMcpTool(toolName)) return; // handled by handleCursorMcp
   const command = input?.tool_input?.command ?? input?.tool_input?.cmd;
-  await recordToolUse(dir, cursorSessionId(input),
-    { ...classifyAndScore(toolName, command, () => input?.tool_output ?? input?.tool_response ?? input), host: 'cursor' }, configSnapshotId);
+  const response = input?.tool_output ?? input?.tool_response;
+  const scored = classifyAndScore(toolName, command, () => response ?? input);
+  const metadata = classifyToolUse(toolName, command) === 'graft'
+    ? toolMetadata(input, 'cursor', dir, response) : {};
+  await recordHostUse(dir, cursorSessionId(input), 'cursor', scored, metadata, configSnapshotId);
 }
 
 /**
@@ -306,8 +399,10 @@ async function handleCursorPostTool(input: any, dir: string, configSnapshotId?: 
 async function handleCursorMcp(input: any, dir: string, configSnapshotId?: string): Promise<void> {
   const toolName = String(input?.tool_name ?? '');
   if (!isGraftMcpTool(toolName)) return;
-  const savedTokens = parseSavings(JSON.stringify(input?.result_json ?? input?.result ?? input ?? ''));
-  await recordToolUse(dir, cursorSessionId(input), { kind: 'graft', savedTokens, host: 'cursor' }, configSnapshotId);
+  const response = input?.result_json ?? input?.result;
+  const savedTokens = parseSavings(JSON.stringify(response ?? ''));
+  await recordHostUse(dir, cursorSessionId(input), 'cursor', { kind: 'graft', savedTokens },
+    toolMetadata(input, 'cursor', dir, response), configSnapshotId);
 }
 
 /** Cursor keys a chat by `conversation_id` (its `session_id` equivalent). */
@@ -399,9 +494,13 @@ export async function main(event: string): Promise<void> {
   const startedAt = Date.now();
   let outcome: 'ok' | 'error' = 'ok';
   const isCursor = event.startsWith('cursor-');
-  const host = isCursor ? 'cursor' : process.env.CODEX_SESSION_ID ? 'codex' : 'claude-code';
+  const host = isCursor ? 'cursor' : process.env.CODEX_SESSION_ID || input?.turn_id ? 'codex' : 'claude-code';
   const sessionId = isCursor ? cursorSessionId(input) : input?.session_id || process.env.CODEX_SESSION_ID || 'default';
-  const configSnapshotId = await recordHarnessConfiguration(host, input);
+  if (host === 'claude-code' && event === 'session-start') rememberClaudeModel(dir, sessionId, input?.model);
+  if (host === 'claude-code' && event === 'post-model-switch') rememberClaudeModel(dir, sessionId, input?.to_model);
+  const configurationInput = host === 'claude-code' && event === 'tool-savings'
+    ? { model: currentClaudeModel(dir, sessionId), effort: input?.effort } : input;
+  const configSnapshotId = await recordHarnessConfiguration(host, configurationInput);
   const configuredEvent: Record<string, string> = {
     'session-start': 'SessionStart', prompt: 'UserPromptSubmit', 'post-edit': 'PostToolUse',
     'tool-savings': 'PostToolUse', stop: 'Stop', 'post-edit-sync': 'PostToolUse',
@@ -431,7 +530,9 @@ export async function main(event: string): Promise<void> {
 
   if (event === 'post-edit') { await handlePostEdit(input, dir); return; }
 
-  if (event === 'tool-savings') { await handleToolUse(input, dir, configSnapshotId ?? undefined); return; }
+  if (event === 'tool-savings') { await handleToolUse(input, dir, host === 'codex' ? 'codex' : 'claude-code', configSnapshotId ?? undefined); return; }
+
+  if (event === 'post-model-switch') return;
 
   if (event === 'cursor-post-tool') { await handleCursorPostTool(input, dir, configSnapshotId ?? undefined); return; }
 
