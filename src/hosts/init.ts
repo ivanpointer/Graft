@@ -11,6 +11,8 @@ import { upsertSection } from './sections.js';
 import { registerMcpConfigs, type McpWrite } from './mcp-config.js';
 import { installCodexHooks } from './codex-hooks.js';
 import { installCursorHooks } from './cursor-hooks.js';
+import { installGeminiAttribution } from './gemini-attribution.js';
+import { installOpenCodeAttribution } from './opencode-attribution.js';
 import type { ConfigWrite } from './config-write.js';
 import { installAntigravitySkill } from './antigravity.js';
 
@@ -89,10 +91,19 @@ export function runHostsInit(
     opts.hooks === false || !selected.some((h) => h.id === 'cursor')
       ? []
       : installCursorHooks(repo);
+  const geminiHooks =
+    opts.hooks === false || !selected.some((h) => h.id === 'gemini')
+      ? []
+      : installGeminiAttribution(repo);
+  const openCodeHooks =
+    opts.hooks === false || !selected.some((h) => h.id === 'agents')
+      || !probe.dirExists(join(home, '.config', 'opencode'))
+      ? []
+      : installOpenCodeAttribution(repo);
   // Antigravity's skill is a global write too, so --no-global suppresses it as well.
   const antigravitySkill =
     opts.global === false || !selected.some((h) => h.id === 'antigravity')
       ? []
       : installAntigravitySkill(home);
-  return { written, skipped, unknown, mcp, hooks: [...hooks, ...cursorHooks, ...antigravitySkill] };
+  return { written, skipped, unknown, mcp, hooks: [...hooks, ...cursorHooks, ...geminiHooks, ...openCodeHooks, ...antigravitySkill] };
 }

@@ -153,7 +153,7 @@ test('global: false keeps the instruction file but skips every ~ write', () => {
 
   assert.deepEqual(r.written.map((w) => w.id), ['agents']);
   assert.ok(existsSync(join(repo, 'AGENTS.md')));
-  assert.deepEqual(r.hooks, []);
+  assert.deepEqual(r.hooks.map((h) => h.id), ['opencode-attribution-plugin']);
   assert.ok(!existsSync(join(home, '.codex', 'hooks.json')));
   assert.ok(!existsSync(join(home, '.codex', 'config.toml')));
   // The repo-local opencode MCP config is not a global write, so it survives.
