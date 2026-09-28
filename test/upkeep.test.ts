@@ -136,6 +136,20 @@ test('by default a refresh DOES reach ~/.codex — nothing else ever would', () 
   assert.equal(r?.global, true);
 });
 
+test('a runtime wiring policy can suppress global refreshes without changing stored intent', () => {
+  const repo = tmpRepo('upkeep-external-global');
+  writeStamp(repo, '1.0.0', ['agents'], { global: true });
+  let seen: WiringOpts | null = null;
+  const r = reconcileWiring(repo, '2.0.0', {
+    wired: () => ['agents'],
+    effectiveOpts: (opts) => ({ ...opts, global: false }),
+    rewrite: (_repo, _hosts, opts) => { seen = opts; },
+  });
+  assert.deepEqual(seen, { global: false, mcp: true, hooks: true, statusline: true });
+  assert.equal(r?.global, false, 'the refresh report describes what was actually written');
+  assert.equal(readStamp(repo)?.opts?.global, true, 'removing the runtime policy restores init intent');
+});
+
 test('wiredHostIds reads what init actually wrote, not what the machine has', () => {
   const repo = tmpRepo('upkeep-wired');
   assert.deepEqual(wiredHostIds(repo), [], 'unwired repo');

@@ -300,6 +300,8 @@ export function reconcileWiring(
   current: string,
   deps: {
     wired?: (repo: string) => string[];
+    /** Apply a runtime policy without changing the init intent stored in the stamp. */
+    effectiveOpts?: (opts: WiringOpts) => WiringOpts;
     rewrite: (repo: string, hosts: string[], opts: WiringOpts) => void;
   },
 ): WiringRefresh | null {
@@ -315,9 +317,12 @@ export function reconcileWiring(
     const hosts = [...new Set([...(stamp?.hosts ?? []), ...onDisk])].sort();
     if (hosts.length === 0) return null; // never wired here — not our business
     const opts = wiringOpts(stamp);
-    deps.rewrite(repo, hosts, opts);
+    const effective = deps.effectiveOpts?.(opts) ?? opts;
+    deps.rewrite(repo, hosts, effective);
+    // Preserve the user's init choice. A machine policy can be removed later;
+    // it should not silently become permanent repo state after one refresh.
     writeStamp(repo, current, hosts, opts);
-    return { from: stamp?.version ?? 'unwired', to: current, hosts, global: opts.global };
+    return { from: stamp?.version ?? 'unwired', to: current, hosts, global: effective.global };
   } catch {
     return null; // a refresh is an optimization; never fail the caller over it
   }
