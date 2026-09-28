@@ -134,6 +134,12 @@ export class OpenAIChatModel implements ChatModel {
   readonly label: string;
   private client: OpenAI;
   private model: string;
+  // Learned from narrowly-detected 400 responses. These are deliberately
+  // instance-local: one compatible endpoint/model must not change requests to
+  // another, but repeated calls to the same model avoid a known retry.
+  private requiresNoReasoningForForcedTools = false;
+  private requiresMaxCompletionTokens = false;
+  private rejectsTemperature = false;
 
   constructor(opts: OpenAIChatModelOptions) {
     this.model = opts.model;
@@ -152,8 +158,11 @@ export class OpenAIChatModel implements ChatModel {
     const messages = req.messages.map(toChatMessage);
     const tools = req.tools ? req.tools.map(toChatTool) : undefined;
     const params: ChatParams = { model: this.model, messages };
-    if (req.temperature !== undefined) params.temperature = req.temperature;
-    if (req.maxTokens !== undefined) params.max_tokens = req.maxTokens;
+    if (req.temperature !== undefined && !this.rejectsTemperature) params.temperature = req.temperature;
+    if (req.maxTokens !== undefined) {
+      if (this.requiresMaxCompletionTokens) params.max_completion_tokens = req.maxTokens;
+      else params.max_tokens = req.maxTokens;
+    }
 
     const fmt = req.responseFormat ?? { kind: "text" };
     if (fmt.kind === "json") {
@@ -169,6 +178,10 @@ export class OpenAIChatModel implements ChatModel {
       params.tool_choice = { type: "function", function: { name: fmt.name } };
     } else if (tools) {
       params.tools = tools;
+    }
+
+    if (this.requiresNoReasoningForForcedTools && typeof params.tool_choice === "object") {
+      params.reasoning_effort = "none";
     }
 
     const resp = await this.createChatCompletion(params);
@@ -196,6 +209,7 @@ export class OpenAIChatModel implements ChatModel {
         // also names tool_choice, and turning reasoning off keeps the caller's
         // chosen tool instead of loosening the choice to work around it.
         if (isRejectedToolsWithReasoning(err) && attempt.reasoning_effort === undefined) {
+          this.requiresNoReasoningForForcedTools = true;
           attempt = { ...attempt, reasoning_effort: "none" } as ChatParams;
           continue;
         }
@@ -204,11 +218,13 @@ export class OpenAIChatModel implements ChatModel {
           continue;
         }
         if (isRejectedMaxTokens(err) && attempt.max_tokens !== undefined) {
+          this.requiresMaxCompletionTokens = true;
           const { max_tokens, ...rest } = attempt;
           attempt = { ...rest, max_completion_tokens: max_tokens } as ChatParams;
           continue;
         }
         if (isRejectedTemperature(err) && attempt.temperature !== undefined) {
+          this.rejectsTemperature = true;
           const { temperature, ...rest } = attempt;
           attempt = rest as ChatParams;
           continue;

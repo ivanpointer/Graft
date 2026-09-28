@@ -179,6 +179,86 @@ test("openai: does NOT paper over a rejected object tool_choice when multiple to
   assert.equal(callCount, 1); // no ambiguous retry — the caller asked for "a" specifically
 });
 
+function apiError(message: string) {
+  return new OpenAI.APIError(400, { message }, message, new Headers());
+}
+
+test("openai: remembers that forced tools require reasoning_effort none", async () => {
+  const calls: any[] = [];
+  const client = {
+    chat: {
+      completions: {
+        create: async (params: any) => {
+          calls.push(params);
+          if (calls.length === 1) throw apiError("Function tools with reasoning_effort are not supported");
+          return openAiResp();
+        },
+      },
+    },
+  } as unknown as OpenAI;
+  const m = new OpenAIChatModel({ apiKey: "x", model: "reasoning-model", client });
+  const req: ChatRequest = { messages: [{ role: "user", content: "grade" }], responseFormat: { kind: "json" } };
+
+  await m.create(req);
+  await m.create(req);
+
+  assert.equal(calls.length, 3);
+  assert.equal(calls[0].reasoning_effort, undefined);
+  assert.equal(calls[1].reasoning_effort, "none");
+  assert.equal(calls[2].reasoning_effort, "none"); // learned before the second create()
+});
+
+test("openai: remembers max_completion_tokens after a max_tokens rejection", async () => {
+  const calls: any[] = [];
+  const client = {
+    chat: {
+      completions: {
+        create: async (params: any) => {
+          calls.push(params);
+          if (calls.length === 1) throw apiError("max_tokens is not supported; use max_completion_tokens");
+          return openAiResp();
+        },
+      },
+    },
+  } as unknown as OpenAI;
+  const m = new OpenAIChatModel({ apiKey: "x", model: "reasoning-model", client });
+  const req: ChatRequest = { messages: [{ role: "user", content: "hi" }], maxTokens: 123 };
+
+  await m.create(req);
+  await m.create(req);
+
+  assert.equal(calls.length, 3);
+  assert.equal(calls[0].max_tokens, 123);
+  assert.equal(calls[1].max_completion_tokens, 123);
+  assert.equal(calls[2].max_tokens, undefined);
+  assert.equal(calls[2].max_completion_tokens, 123); // learned before the second create()
+});
+
+test("openai: remembers to omit temperature after a temperature rejection", async () => {
+  const calls: any[] = [];
+  const client = {
+    chat: {
+      completions: {
+        create: async (params: any) => {
+          calls.push(params);
+          if (calls.length === 1) throw apiError("temperature does not support values other than 1");
+          return openAiResp();
+        },
+      },
+    },
+  } as unknown as OpenAI;
+  const m = new OpenAIChatModel({ apiKey: "x", model: "reasoning-model", client });
+  const req: ChatRequest = { messages: [{ role: "user", content: "hi" }], temperature: 0 };
+
+  await m.create(req);
+  await m.create(req);
+
+  assert.equal(calls.length, 3);
+  assert.equal(calls[0].temperature, 0);
+  assert.equal(calls[1].temperature, undefined);
+  assert.equal(calls[2].temperature, undefined); // learned before the second create()
+});
+
 // --- Anthropic adapter ------------------------------------------------------
 
 function fakeAnthropic(resp: unknown) {
