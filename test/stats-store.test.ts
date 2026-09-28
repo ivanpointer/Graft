@@ -1,8 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, statSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { formatStatsReport, readStatsReport, recordInvocation, statsPath } from '../src/stats/store.js';
 
 function freshHome(): string { return mkdtempSync(join(tmpdir(), 'graft-stats-')); }
@@ -28,4 +29,39 @@ test('machine stats retain exact local call, repo, and savings totals', () => {
 
 test('machine stats report a useful empty state', () => {
   assert.equal(formatStatsReport(readStatsReport({ home: freshHome() })), 'graft machine stats: no recorded calls yet.');
+});
+
+test('machine stats upgrade databases created before session IDs', () => {
+  const home = freshHome();
+  const path = statsPath(home);
+  mkdirSync(join(home, '.graft', 'stats'), { recursive: true });
+  const legacy = new DatabaseSync(path);
+  legacy.exec(`
+    CREATE TABLE invocations (
+      id TEXT PRIMARY KEY,
+      occurred_at TEXT NOT NULL,
+      command TEXT NOT NULL,
+      surface TEXT NOT NULL,
+      repo_path TEXT,
+      repo_name TEXT,
+      host TEXT,
+      hit INTEGER,
+      ok INTEGER NOT NULL,
+      duration_ms INTEGER,
+      saved_tokens INTEGER NOT NULL DEFAULT 0,
+      baseline_tokens INTEGER,
+      output_tokens INTEGER,
+      source_files INTEGER
+    );
+    INSERT INTO invocations (id, occurred_at, command, surface, ok, saved_tokens)
+    VALUES ('old-row', '2026-01-01T00:00:00.000Z', 'map', 'cli', 1, 200);
+  `);
+  legacy.close();
+
+  recordInvocation({ command: 'ask', surface: 'cli', repo: '/work/alpha', savedTokens: 800, sessionId: 'session-1' }, home);
+
+  const report = readStatsReport({ home });
+  assert.equal(report.calls, 2);
+  assert.equal(report.sessions, 1);
+  assert.equal(report.savedTokens, 1000);
 });

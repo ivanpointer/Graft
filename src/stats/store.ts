@@ -82,14 +82,15 @@ function open(home?: string): DatabaseSync {
     );
     CREATE INDEX IF NOT EXISTS invocations_occurred_at ON invocations(occurred_at);
     CREATE INDEX IF NOT EXISTS invocations_repo_path ON invocations(repo_path);
-    CREATE INDEX IF NOT EXISTS invocations_session_id ON invocations(session_id);
     CREATE INDEX IF NOT EXISTS invocations_command ON invocations(command);
   `);
   const columns = db.prepare('PRAGMA table_info(invocations)').all() as Array<{ name?: string }>;
   if (!columns.some((column) => column.name === 'session_id')) {
     db.exec('ALTER TABLE invocations ADD COLUMN session_id TEXT');
-    db.exec('CREATE INDEX IF NOT EXISTS invocations_session_id ON invocations(session_id)');
   }
+  // The index must come after the additive migration: existing v1 databases
+  // predate `session_id`, and SQLite rejects an index on a missing column.
+  db.exec('CREATE INDEX IF NOT EXISTS invocations_session_id ON invocations(session_id)');
   return db;
 }
 
