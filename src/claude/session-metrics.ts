@@ -34,7 +34,6 @@ import { join } from 'node:path';
 import { sumSavingsFooters } from '../context/savings.js';
 import { dollarsSaved, formatDollars } from '../context/price.js';
 import { readSession, writeSession, sessionDir, listSessionIds, type SessionState } from './state.js';
-import type { AgentHost } from '../telemetry/contract.js';
 import { GRAFT_MCP_TOOL_NAMES } from '../mcp/tool-names.js';
 import { recordToolObservation } from '../stats/store.js';
 
@@ -111,7 +110,21 @@ export interface ToolUse {
   savedTokens?: number;
   /** The host recording this use. Stamped on the session file (once) so the
    * `session_summary` is attributed correctly no matter which host later flushes it. */
-  host?: AgentHost;
+  host?: 'codex' | 'claude-code' | 'cursor' | 'mcp' | 'cli';
+  /** Correlation is accepted only from the Graft result marker, never a host guess. */
+  invocationId?: string;
+  turnId?: string;
+  toolUseId?: string;
+  metadataSource?: 'host-payload' | 'host-transcript';
+}
+
+type ObservedSession = SessionState & { observedToolUseKeys?: string[] };
+
+/** Keep duplicate native hook deliveries from inflating the live session tally. */
+function observationKey(use: ToolUse): string | undefined {
+  if (use.invocationId) return `invocation:${use.invocationId}`;
+  if (use.host && use.toolUseId) return `tool:${use.host}:${use.toolUseId}`;
+  return undefined;
 }
 
 /**
@@ -131,7 +144,19 @@ export async function recordToolUse(dir: string, sessionId: string, use: ToolUse
   const kind = use.kind ?? (saved > 0 ? 'graft' : null);
   if (!kind) return;
   const id = sessionId || 'default';
-  const s = readSession(dir, id);
+  const s: ObservedSession = readSession(dir, id);
+  const key = observationKey(use);
+  if (key && s.observedToolUseKeys?.includes(key)) return;
+  // The observation store has a unique invocation/tool-use constraint as well.
+  // Let it settle before updating this repo-local session so duplicate hook
+  // processes cannot each add the same saved tokens to the statusline.
+  const observation = {
+    repo: dir, sessionId: id, host: use.host, kind, savedTokens: saved,
+    configSnapshotId, invocationId: use.invocationId, turnId: use.turnId,
+    toolUseId: use.toolUseId, metadataSource: use.metadataSource,
+  };
+  const outcome: unknown = await recordToolObservation(observation);
+  if (outcome === 'duplicate') return;
   if (kind === 'graft') s.graftReads = (s.graftReads ?? 0) + 1;
   else if (kind === 'source') s.sourceReads = (s.sourceReads ?? 0) + 1;
   if (saved > 0) s.savedTokens = (s.savedTokens ?? 0) + saved;
@@ -140,12 +165,9 @@ export async function recordToolUse(dir: string, sessionId: string, use: ToolUse
   // with several graft calls is still one reply to the user.
   if (kind === 'graft') s.turnUsedGraft = true;
   // Stamp the host once; the first tool use that lands owns the attribution.
-  if (use.host && !s.host) s.host = use.host;
+  if (use.host && !s.host) s.host = use.host as SessionState['host'];
+  if (key) s.observedToolUseKeys = [...(s.observedToolUseKeys ?? []), key].slice(-128);
   writeSession(dir, id, s);
-  // The session file remains the live operational state; this append-only fact
-  // is the machine-wide adoption record. It deliberately does not add to the
-  // authoritative CLI/MCP saved-token total in `invocations`.
-  await recordToolObservation({ repo: dir, sessionId: id, host: use.host, kind, savedTokens: saved, configSnapshotId });
 }
 
 export interface SessionSummary extends SessionState {

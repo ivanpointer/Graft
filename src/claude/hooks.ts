@@ -13,7 +13,7 @@ import { flushClosedSessions, summarizeSession } from '../telemetry/sessions.js'
 import { hasSavingsTally, lastAssistantTurn, lastTurnBilling } from './tally.js';
 import { scopeOf, scopesOfGraph } from '../graph/scopes.js';
 import { classifyToolUse, isMcpToolName, isGraftMcpTool, parseSavings, recordToolUse, type ToolKind } from './session-metrics.js';
-import { recordHookRun, recordToolObservation } from '../stats/store.js';
+import { recordHookRun } from '../stats/store.js';
 import { recordHarnessConfiguration } from '../stats/config.js';
 
 const INVOCATION_ID_LINE = /^\[graft\] invocation_id=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\r?$/gim;
@@ -73,30 +73,6 @@ export function toolMetadata(input: any, host: 'codex' | 'claude-code' | 'cursor
     reasoningEffort,
     metadataSource: model || reasoningEffort ? 'host-payload' : undefined,
   };
-}
-
-/** Preserve live adoption counters while writing exactly one correlated fact. */
-async function recordHostUse(
-  dir: string, sessionId: string, host: 'codex' | 'claude-code' | 'cursor',
-  use: { kind: ToolKind | null; savedTokens: number }, metadata: ObservedToolMetadata,
-  configSnapshotId?: string,
-): Promise<void> {
-  if (!metadata.invocationId || use.kind !== 'graft') {
-    await recordToolUse(dir, sessionId, { ...use, host: host as Parameters<typeof recordToolUse>[2]['host'] }, configSnapshotId);
-    return;
-  }
-  const observation = {
-    repo: dir, sessionId: sessionId || 'default', host, kind: 'graft' as const, savedTokens: use.savedTokens,
-    configSnapshotId, ...metadata,
-  };
-  if (await recordToolObservation(observation) === 'duplicate') return;
-  const id = sessionId || 'default';
-  const session = readSession(dir, id);
-  session.graftReads = (session.graftReads ?? 0) + 1;
-  if (use.savedTokens > 0) session.savedTokens = (session.savedTokens ?? 0) + use.savedTokens;
-  session.turnUsedGraft = true;
-  if (!session.host) Object.assign(session, { host });
-  writeSession(dir, id, session);
 }
 
 /** Prompts shorter than this never trigger retrieval — they are almost always
@@ -340,7 +316,7 @@ async function handleToolUse(input: any, dir: string, host: 'codex' | 'claude-co
   const scored = classifyAndScore(input?.tool_name, input?.tool_input?.command, () => response ?? input);
   const metadata = classifyToolUse(input?.tool_name, input?.tool_input?.command) === 'graft'
     ? toolMetadata(input, host, dir, response) : {};
-  await recordHostUse(dir, input?.session_id || 'default', host, scored, metadata, configSnapshotId);
+  await recordToolUse(dir, input?.session_id || 'default', { ...scored, ...metadata, host }, configSnapshotId);
 }
 
 /**
@@ -384,7 +360,7 @@ async function handleCursorPostTool(input: any, dir: string, configSnapshotId?: 
   const scored = classifyAndScore(toolName, command, () => response ?? input);
   const metadata = classifyToolUse(toolName, command) === 'graft'
     ? toolMetadata(input, 'cursor', dir, response) : {};
-  await recordHostUse(dir, cursorSessionId(input), 'cursor', scored, metadata, configSnapshotId);
+  await recordToolUse(dir, cursorSessionId(input), { ...scored, ...metadata, host: 'cursor' }, configSnapshotId);
 }
 
 /**
@@ -397,8 +373,9 @@ async function handleCursorMcp(input: any, dir: string, configSnapshotId?: strin
   if (!isGraftMcpTool(toolName)) return;
   const response = input?.result_json ?? input?.result;
   const savedTokens = parseSavings(JSON.stringify(response ?? ''));
-  await recordHostUse(dir, cursorSessionId(input), 'cursor', { kind: 'graft', savedTokens },
-    toolMetadata(input, 'cursor', dir, response), configSnapshotId);
+  await recordToolUse(dir, cursorSessionId(input), {
+    kind: 'graft', savedTokens, ...toolMetadata(input, 'cursor', dir, response), host: 'cursor',
+  }, configSnapshotId);
 }
 
 /** Cursor keys a chat by `conversation_id` (its `session_id` equivalent). */
