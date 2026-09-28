@@ -11,7 +11,7 @@ import { ensureFreshChildren, ensureFreshGraph, refreshNote } from '../graph/ref
 import { contextDirFor } from '../context/node-file.js';
 import { resolveSymbol, edgeWalk, type Direction, type EdgeHit } from '../graph/traverse.js';
 import { callersSavings, headerOf, hitLine, looseNoteFor } from '../graph/traverse-cli.js';
-import { withSavings, setInputRate } from '../context/savings.js';
+import { withSavings, setInputRate, sumSavingsFooters } from '../context/savings.js';
 import { sessionInputRate } from '../claude/session-metrics.js';
 import { recordInvocation } from '../stats/store.js';
 import { grepGraph } from '../search/grep.js';
@@ -220,8 +220,10 @@ export async function callTool(
   args: Record<string, unknown>,
   dirOverride?: string,
 ): Promise<{ text: string; isError: boolean }> {
+  const startedAt = Date.now();
+  const canonicalName = canonicalToolName(requestedName);
   try {
-    const name = canonicalToolName(requestedName);
+    const name = canonicalName;
     const ws = readWorkspace(root, dirOverride);
     // Freshness first: an answer that cites file:line has to be about the code as
     // it is right now, including edits nobody has committed (or even saved through
