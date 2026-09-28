@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, statSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -16,7 +16,6 @@ import {
   recordToolObservation,
   statsPath,
 } from '../src/stats/store.js';
-import { recordGraftConfiguration } from '../src/stats/config.js';
 
 function freshHome(): string { return mkdtempSync(join(tmpdir(), 'graft-stats-')); }
 
@@ -43,20 +42,56 @@ test('machine stats report a useful empty state', async () => {
   assert.equal(formatStatsReport(await readStatsReport({ home: freshHome() })), 'graft machine stats: no recorded calls yet.');
 });
 
-test('machine stats group saved tokens by immutable model and reasoning-effort configuration', async () => {
+test('machine stats attribute invocation savings only to correlated, observed host metadata', async () => {
   const home = freshHome();
-  const snapshot = await recordGraftConfiguration({
-    provider: 'openai', model: 'gpt-5.2-codex', reasoningEffort: 'high',
-  }, home, {});
+  const snapshot = await recordConfigurationSnapshot({
+    domain: 'graft', schemaVersion: 1, settings: { model: 'configured-graft-model' },
+    dimensions: { harness: { provider: 'configured', model: 'not-observed', reasoningEffort: 'high' } },
+  }, home);
   assert.ok(snapshot);
-  await recordInvocation({ command: 'ask', surface: 'cli', savedTokens: 700, configSnapshotId: snapshot! }, home);
-  await recordInvocation({ command: 'map', surface: 'mcp', savedTokens: 300 }, home);
+  const invocationId = await recordInvocation({ command: 'ask', surface: 'cli', savedTokens: 700, configSnapshotId: snapshot! }, home);
+  assert.match(invocationId!, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  await recordToolObservation({
+    host: 'codex', sessionId: 's1', turnId: 't1', toolUseId: 'u1', kind: 'graft',
+    invocationId: invocationId!, savedTokens: 700, provider: 'openai', model: 'observed-host-model',
+    reasoningEffort: 'medium', metadataSource: 'host-payload',
+  }, home);
+  await recordToolObservation({
+    host: 'codex', sessionId: 's1', turnId: 't1', toolUseId: 'u1', kind: 'graft',
+    invocationId: invocationId!, savedTokens: 700, metadataSource: 'host-payload', model: 'retry',
+  }, home);
+  await recordToolObservation({
+    host: 'codex', sessionId: 's1', turnId: 't1', toolUseId: 'u2', kind: 'graft',
+    invocationId: invocationId!, savedTokens: 700, metadataSource: 'host-payload', model: 'retry',
+  }, home);
+  const otherInvocationId = await recordInvocation({ command: 'map', surface: 'mcp', savedTokens: 300 }, home);
+  await recordToolObservation({
+    host: 'codex', kind: 'graft', invocationId: otherInvocationId!, toolUseId: 'u4',
+    model: 'unproven-model',
+  }, home);
+  await recordToolObservation({
+    host: 'codex', sessionId: 's1', toolUseId: 'u3', kind: 'graft',
+    metadataSource: 'host-payload', model: 'unlinked-host-model',
+  }, home);
+  await recordToolObservation({ host: 'cursor', toolUseId: 'source-1', kind: 'source' }, home);
+  await recordToolObservation({ host: 'cursor', toolUseId: 'source-1', kind: 'source' }, home);
 
   const report = await readStatsReport({ home });
   assert.deepEqual(report.modelEfforts, [
-    { provider: 'unknown', model: 'unknown', reasoningEffort: 'unknown', calls: 2, savedTokens: 1000 },
+    { provider: 'openai', model: 'observed-host-model', reasoningEffort: 'medium', calls: 1, savedTokens: 700 },
+    { provider: 'unknown', model: 'unknown', reasoningEffort: 'unknown', calls: 1, savedTokens: 300 },
   ]);
-  assert.match(formatStatsReport(report), /unknown\/unknown \(unknown\)/);
+  assert.equal(report.savedTokens, 1000, 'host observation savings are never added to invocation savings');
+  const db = new DatabaseSync(statsPath(home), { readOnly: true });
+  assert.equal((db.prepare('SELECT COUNT(*) AS n FROM tool_observations').get() as { n: number }).n, 4);
+  db.close();
+});
+
+test('invocation recording returns null when the best-effort database write fails', async () => {
+  const home = freshHome();
+  const invalidHome = join(home, 'file');
+  writeFileSync(invalidHome, '');
+  assert.equal(await recordInvocation({ command: 'ask', surface: 'cli' }, invalidHome), null);
 });
 
 test('machine stats upgrade databases created before session IDs', async () => {
@@ -83,6 +118,12 @@ test('machine stats upgrade databases created before session IDs', async () => {
     );
     INSERT INTO invocations (id, occurred_at, command, surface, ok, saved_tokens)
     VALUES ('old-row', '2026-01-01T00:00:00.000Z', 'map', 'cli', 1, 200);
+    CREATE TABLE tool_observations (
+      id TEXT PRIMARY KEY, occurred_at TEXT NOT NULL, repo_path TEXT, session_id TEXT, host TEXT,
+      kind TEXT NOT NULL, saved_tokens INTEGER NOT NULL DEFAULT 0, config_snapshot_id TEXT
+    );
+    INSERT INTO tool_observations (id, occurred_at, host, kind, saved_tokens)
+    VALUES ('old-observation', '2026-01-01T00:00:00.000Z', 'codex', 'graft', 200);
   `);
   legacy.close();
 
@@ -92,6 +133,12 @@ test('machine stats upgrade databases created before session IDs', async () => {
   assert.equal(report.calls, 2);
   assert.equal(report.sessions, 1);
   assert.equal(report.savedTokens, 1000);
+  assert.deepEqual(report.modelEfforts, [
+    { provider: 'unknown', model: 'unknown', reasoningEffort: 'unknown', calls: 2, savedTokens: 1000 },
+  ]);
+  const db = new DatabaseSync(path, { readOnly: true });
+  assert.equal((db.prepare('SELECT COUNT(*) AS n FROM tool_observations WHERE id = ?').get('old-observation') as { n: number }).n, 1);
+  db.close();
 });
 
 test('Umzug migrations retain legacy calls and record the unified fact model', async () => {

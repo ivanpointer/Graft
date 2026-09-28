@@ -33,7 +33,7 @@ export interface Invocation {
 }
 
 /** The latest local schema revision. Migrations are additive and idempotent. */
-export const STATS_SCHEMA_VERSION = 6;
+export const STATS_SCHEMA_VERSION = 7;
 
 export interface ConfigurationSnapshot {
   /** `graft`, `harness`, or `jev`; keeps independent setting namespaces distinct. */
@@ -67,6 +67,17 @@ export interface ToolObservation {
   repo?: string;
   sessionId?: string;
   host?: string;
+  /** Exact invocation returned by recordInvocation; never inferred from a session. */
+  invocationId?: string;
+  /** Host identifiers for retry-safe tool-use observations. */
+  turnId?: string;
+  toolUseId?: string;
+  /** Observed coding-host metadata, never Graft's configured LLM defaults. */
+  provider?: string;
+  model?: string;
+  reasoningEffort?: string;
+  /** Provenance required before model/effort is used in reports. */
+  metadataSource?: 'host-payload' | 'host-transcript';
   /** Adoption signal only; savings remain authoritative on `invocations`. */
   kind: 'graft' | 'source';
   savedTokens?: number;
@@ -288,6 +299,24 @@ function migration6(db: DatabaseSync): void {
   }
 }
 
+/** Link host observations to exact invocation facts without rewriting legacy rows. */
+function migration7(db: DatabaseSync): void {
+  addColumn(db, 'tool_observations', 'invocation_id', 'TEXT REFERENCES invocations(id)');
+  addColumn(db, 'tool_observations', 'turn_id', 'TEXT');
+  addColumn(db, 'tool_observations', 'tool_use_id', 'TEXT');
+  addColumn(db, 'tool_observations', 'observed_provider', 'TEXT');
+  addColumn(db, 'tool_observations', 'observed_model', 'TEXT');
+  addColumn(db, 'tool_observations', 'observed_reasoning_effort', 'TEXT');
+  addColumn(db, 'tool_observations', 'metadata_source', 'TEXT');
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS tool_observations_invocation_id
+      ON tool_observations(invocation_id) WHERE invocation_id IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS tool_observations_host_tool_use
+      ON tool_observations(host, tool_use_id)
+      WHERE host IS NOT NULL AND tool_use_id IS NOT NULL;
+  `);
+}
+
 interface MigrationContext { db: DatabaseSync; }
 
 /** Umzug storage backed by the same local SQLite database we are migrating. */
@@ -310,7 +339,7 @@ class SqliteMigrationStorage implements UmzugStorage<MigrationContext> {
   }
 }
 
-const MIGRATIONS = [migration1, migration2, migration3, migration4, migration5, migration6].map((up, index) => ({
+const MIGRATIONS = [migration1, migration2, migration3, migration4, migration5, migration6, migration7].map((up, index) => ({
   name: `${String(index + 1).padStart(3, '0')}-stats-schema`,
   up: async ({ context }: MigrationParams<MigrationContext>) => {
     context.db.exec('BEGIN IMMEDIATE');
@@ -344,6 +373,7 @@ function open(home?: string): DatabaseSync {
   db.exec(`
     PRAGMA journal_mode = WAL;
     PRAGMA busy_timeout = 500;
+    PRAGMA foreign_keys = ON;
   `);
   return db;
 }
@@ -358,9 +388,10 @@ async function withDatabase<T>(home: string | undefined, work: (db: DatabaseSync
   }
 }
 
-/** Persist one exact local observation. Never throws. */
-export async function recordInvocation(invocation: Invocation, home?: string): Promise<void> {
+/** Persist one exact local invocation and return its join key, or null on failure. */
+export async function recordInvocation(invocation: Invocation, home?: string): Promise<string | null> {
   try {
+    const id = randomUUID();
     await withDatabase(home, (db) => {
       db.prepare(`
         INSERT INTO invocations (
@@ -368,7 +399,7 @@ export async function recordInvocation(invocation: Invocation, home?: string): P
           ok, duration_ms, saved_tokens, baseline_tokens, output_tokens, source_files, config_snapshot_id
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
-        randomUUID(), new Date().toISOString(), invocation.command, invocation.surface,
+        id, new Date().toISOString(), invocation.command, invocation.surface,
         invocation.repo ?? null, invocation.repo ? basename(invocation.repo) : null,
         invocation.sessionId ?? sessionIdFromEnvironment() ?? null,
         invocation.host ?? null, invocation.hit === undefined ? null : Number(invocation.hit),
@@ -380,7 +411,11 @@ export async function recordInvocation(invocation: Invocation, home?: string): P
         invocation.configSnapshotId ?? null,
       );
     });
-  } catch { /* stats must never affect a graft command */ }
+    return id;
+  } catch {
+    // Stats must never affect a Graft command.
+    return null;
+  }
 }
 
 /** Stable JSON prevents semantically identical settings from fragmenting reports. */
@@ -467,15 +502,24 @@ export async function recordHookRun(run: HookRun, home?: string): Promise<void> 
 /** Persist a host-side read classification without duplicating invocation savings. */
 export async function recordToolObservation(observation: ToolObservation, home?: string): Promise<void> {
   try {
+    const metadataSource = observation.metadataSource === 'host-payload' || observation.metadataSource === 'host-transcript'
+      ? observation.metadataSource : null;
     await withDatabase(home, (db) => {
       db.prepare(`
-        INSERT INTO tool_observations (
-          id, occurred_at, repo_path, session_id, host, kind, saved_tokens, config_snapshot_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT OR IGNORE INTO tool_observations (
+          id, occurred_at, repo_path, session_id, host, kind, saved_tokens, config_snapshot_id,
+          invocation_id, turn_id, tool_use_id, observed_provider, observed_model,
+          observed_reasoning_effort, metadata_source
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         randomUUID(), observation.occurredAt ?? new Date().toISOString(), observation.repo ?? null,
         cleanText(observation.sessionId ?? sessionIdFromEnvironment(), 512), cleanText(observation.host, 96),
         observation.kind, Math.max(0, nonNegative(observation.savedTokens) ?? 0), observation.configSnapshotId ?? null,
+        cleanText(observation.invocationId, 64), cleanText(observation.turnId, 512), cleanText(observation.toolUseId, 512),
+        metadataSource ? cleanText(observation.provider, 96) : null,
+        metadataSource ? cleanText(observation.model, 256) : null,
+        metadataSource ? cleanText(observation.reasoningEffort, 96) : null,
+        metadataSource,
       );
     });
   } catch { /* observations are strictly best-effort */ }
@@ -578,17 +622,18 @@ export async function readStatsReport(opts: { sinceDays?: number; home?: string 
       `).all(...args) as Array<Record<string, unknown>>;
       const dimensionWhere = since ? 'WHERE i.occurred_at >= ?' : '';
       const dimensions = db.prepare(`
-        SELECT COALESCE(NULLIF(c.harness_provider, ''), 'unknown') AS provider,
-               COALESCE(NULLIF(c.harness_model, ''), 'unknown') AS model,
-               COALESCE(NULLIF(c.harness_reasoning_effort, ''), 'unknown') AS reasoningEffort,
+        SELECT COALESCE(NULLIF(o.observed_provider, ''), 'unknown') AS provider,
+               COALESCE(NULLIF(o.observed_model, ''), 'unknown') AS model,
+               COALESCE(NULLIF(o.observed_reasoning_effort, ''), 'unknown') AS reasoningEffort,
                COUNT(*) AS calls, COALESCE(SUM(i.saved_tokens), 0) AS savedTokens
         FROM invocations i
-        LEFT JOIN config_snapshots c ON c.id = i.config_snapshot_id AND c.domain = 'graft'
+        LEFT JOIN tool_observations o ON o.invocation_id = i.id AND o.kind = 'graft'
+          AND o.metadata_source IN ('host-payload', 'host-transcript')
         ${dimensionWhere}
         GROUP BY
-          COALESCE(NULLIF(c.harness_provider, ''), 'unknown'),
-          COALESCE(NULLIF(c.harness_model, ''), 'unknown'),
-          COALESCE(NULLIF(c.harness_reasoning_effort, ''), 'unknown')
+          COALESCE(NULLIF(o.observed_provider, ''), 'unknown'),
+          COALESCE(NULLIF(o.observed_model, ''), 'unknown'),
+          COALESCE(NULLIF(o.observed_reasoning_effort, ''), 'unknown')
       `).all(...args) as Array<Record<string, unknown>>;
       const calls = Number(totals.calls ?? 0);
       const savedTokens = Number(totals.savedTokens ?? 0);
