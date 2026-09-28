@@ -8,6 +8,7 @@
 import { runInit } from './claude/init.js';
 import { runHostsInit } from './hosts/init.js';
 import { graftCliPath } from './claude/paths.js';
+import { globalWiringAllowed } from './hosts/global-policy.js';
 import {
   formatUpdateNudge,
   formatWiringRefresh,
@@ -63,7 +64,13 @@ export function runUpkeep(
 ): UpkeepResult {
   const lines: string[] = [];
   try {
-    const refreshed = reconcileWiring(repo, current, { rewrite: rewriteWiring });
+    const refreshed = reconcileWiring(repo, current, {
+      effectiveOpts: (wiring) => ({
+        ...wiring,
+        global: wiring.global && globalWiringAllowed(),
+      }),
+      rewrite: rewriteWiring,
+    });
     const refreshLine = formatWiringRefresh(refreshed);
     if (refreshLine) lines.push(refreshLine);
   } catch { /* fail-soft: wiring refresh is never worth breaking a session for */ }

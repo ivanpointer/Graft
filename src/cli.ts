@@ -16,6 +16,7 @@ import { formatGraphCheckReport } from "./graph/check.js";
 import { buildGraphIfMissing, runInit } from "./claude/init.js";
 import { statuslineWanted } from "./claude/settings-merge.js";
 import { runHostsInit } from "./hosts/init.js";
+import { globalWiringAllowed } from "./hosts/global-policy.js";
 import { hostIds } from "./hosts/registry.js";
 import { parseBrainArg, connectBrain, pullBrain, brainStatus } from "./brain/connect.js";
 import { rulesForPointers } from "./brain/attach.js";
@@ -982,7 +983,7 @@ program
   .option("--no-statusline", "skip writing Claude Code statusLine (keep a user-defined one)")
   .option("--dry-run", "print every file init would touch, then exit without writing")
   .option("-y, --yes", "skip the picker and wire every detected agent (the pre-0.8 default)")
-  .option("--no-global", "skip writes outside this repo (the ~/.codex/ config + hooks)")
+  .option("--no-global", "skip writes outside this repo (also GRAFT_NO_GLOBAL_WIRING=1)")
   .option("--trail <handoff>", "attach a Trail: <brainId>:<token> (or a bare id with GRAFT_BRAIN_TOKEN set)")
   .option("--verbose", "print every file written, the graph build's own output and the closing banner")
   .action(async (dir: string, opts: InitOptions) => {
@@ -1018,6 +1019,10 @@ async function runInitCommand(
       for (const id of [...hostIds(), "claude"]) console.log(id);
       return null;
     }
+    // Let Home Manager, chezmoi, MDM, and similar systems own user-level agent
+    // configuration without giving up Graft's repo-local wiring. Treat the env
+    // policy exactly like --no-global so the wiring stamp records what happened.
+    if (!globalWiringAllowed()) opts = { ...opts, global: false };
     // Parsed before anything is written: a mistyped handoff should cost the user
     // an error, not a half-wired repo they have to `graft uninstall` out of.
     let brainLink: BrainLink | undefined;
