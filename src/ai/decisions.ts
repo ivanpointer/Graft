@@ -129,7 +129,12 @@ export type DeepBuildPhase = "file-summary" | "symbol-meaning";
 export interface PriorMeaning {
   contentHash: string;
   value: string;
-  crux?: Crux;
+  /**
+   * For a symbol, the excerpt is either absent (`null`) or remapped to the
+   * current source before it is exposed to a router. See
+   * {@link DeepBuildRouteCapabilities.symbolMeaningReuse}.
+   */
+  crux?: Crux | null;
 }
 
 export interface DeepBuildRouteItem {
@@ -141,10 +146,22 @@ export interface DeepBuildRouteItem {
   prior?: PriorMeaning;
 }
 
+/** Optional guarantees made by the caller for a deep-build routing request. */
+export interface DeepBuildRouteCapabilities {
+  /**
+   * A `reuse` decision for a symbol is safe only when its supplied prior has
+   * either no crux or a crux whose exact code was found uniquely in the current
+   * node span. Its coordinates therefore point into the current file.
+   */
+  symbolMeaningReuse?: "exact-crux-remap";
+}
+
 export interface DeepBuildRouteInput {
   phase: DeepBuildPhase;
   path: string;
   items: readonly DeepBuildRouteItem[];
+  /** Capabilities vary by phase; hooks must tolerate their absence. */
+  capabilities?: DeepBuildRouteCapabilities;
 }
 
 export interface DeepBuildItemDecision extends DecisionMetadata {

@@ -22,7 +22,7 @@
 import { formatCruxMiss, type CruxMissKind, type CruxSummarizer, type NodeCrux, type NodeRef } from "../ai/crux.js";
 import { LlmFailureGate } from "../ai/failure.js";
 import type { Crux, NodeV1 } from "./types.js";
-import type { DeepBuildRouter } from "../ai/decisions.js";
+import type { DeepBuildRouter, PriorMeaning } from "../ai/decisions.js";
 
 /** Cap on the stored crux: an over-long pick is trimmed to its leading slice. */
 const MAX_CRUX_LINES = 12;
@@ -181,20 +181,25 @@ export async function enrichGraph(
     const processRefs: NodeRef[] = [];
     let routed = false;
     let decisions = new Map<string, "process" | "skip" | "reuse">();
+    // A router sees a prior symbol only after its crux has been proved usable in
+    // this version of the source. Keep that exact artifact separately: hook
+    // output is advisory, so a `reuse` for an absent or unsafe prior must still
+    // fall through to the normal crux call.
+    const reusablePriors: Array<PriorMeaning | undefined> = opts.router
+      ? refs.map((ref, index) => priorForReuse(prior.get(fileNodes[index].id), ref, sourceLines))
+      : [];
     if (opts.router) {
       const raw = await opts.router.route({
         phase: "symbol-meaning",
         path,
+        capabilities: { symbolMeaningReuse: "exact-crux-remap" },
         items: refs.map((ref, index) => {
           const node = fileNodes[index];
-          const was = prior.get(node.id);
           return {
             key: `s${index}`,
             source: sourceLines.slice(ref.startLine - 1, ref.endLine).join("\n"),
             contentHash: node.body_hash,
-            prior: was?.summary_state === "ready" && was.summary
-              ? { contentHash: was.body_hash, value: was.summary, crux: was.crux ?? undefined }
-              : undefined,
+            prior: reusablePriors[index],
           };
         }),
       });
@@ -209,10 +214,10 @@ export async function enrichGraph(
     for (let index = 0; index < fileNodes.length; index++) {
       const node = fileNodes[index];
       const action = decisions.get(`s${index}`) ?? "process";
-      const was = prior.get(node.id);
-      if (action === "reuse" && was?.summary_state === "ready" && was.summary) {
-        node.summary = was.summary;
-        node.crux = was.crux;
+      const reusable = reusablePriors[index];
+      if (action === "reuse" && reusable) {
+        node.summary = reusable.value;
+        node.crux = reusable.crux ?? null;
         node.summary_state = "ready";
         stats.reused++;
         continue;
@@ -364,6 +369,61 @@ function buildCrux(r: NodeCrux, node: NodeV1, source: string, lineCount: number)
   const code = source.split("\n").slice(start - 1, end).join("\n");
   if (!code.trim()) return null;
   return { code, span: `L${start}-L${end}` };
+}
+
+/**
+ * Return a prior artifact only when reusing it cannot also copy a stale crux.
+ *
+ * A crux is stored as verbatim whole source lines. Instead of trusting its old
+ * line pointer, find that exact text in the current node's span and require one
+ * line-boundary-aligned match. A missing crux is safe to reuse; an unmatched or
+ * repeated non-null crux is intentionally withheld from the hook and cannot be
+ * promoted by a malicious or mistaken `reuse` decision.
+ */
+function priorForReuse(
+  was: NodeV1 | undefined,
+  node: NodeRef,
+  sourceLines: readonly string[],
+): PriorMeaning | undefined {
+  if (was?.summary_state !== "ready" || !was.summary) return undefined;
+  const crux = remapCrux(was.crux, node, sourceLines);
+  if (crux === undefined) return undefined;
+  return { contentHash: was.body_hash, value: was.summary, crux };
+}
+
+/** `undefined` means a non-null crux could not be safely remapped; `null` is valid. */
+function remapCrux(
+  prior: Crux | null | undefined,
+  node: NodeRef,
+  sourceLines: readonly string[],
+): Crux | null | undefined {
+  if (prior === null) return null;
+  if (!prior) return undefined;
+  // `buildCrux()` never emits an empty or newline-terminated excerpt. Reject
+  // malformed persisted data rather than allowing an empty string to match at
+  // every offset or a partial-line match to manufacture a span.
+  if (!prior.code.trim() || prior.code.endsWith("\n")) return undefined;
+
+  const current = sourceLines.slice(node.startLine - 1, node.endLine).join("\n");
+  let match: number | undefined;
+  let from = 0;
+  while (from < current.length) {
+    const at = current.indexOf(prior.code, from);
+    if (at < 0) break;
+    const end = at + prior.code.length;
+    const startsLine = at === 0 || current[at - 1] === "\n";
+    const endsLine = end === current.length || current[end] === "\n";
+    if (startsLine && endsLine) {
+      if (match !== undefined) return undefined; // duplicate excerpts are ambiguous
+      match = at;
+    }
+    from = at + 1;
+  }
+  if (match === undefined) return undefined;
+
+  const start = node.startLine + current.slice(0, match).split("\n").length - 1;
+  const end = start + prior.code.split("\n").length - 1;
+  return { code: prior.code, span: `L${start}-L${end}` };
 }
 
 /** Parse a `"L12-L30"` span into a clamped [start, end] line pair (1-based). */
