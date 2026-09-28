@@ -11,7 +11,8 @@ for (const [name, src] of [['statusline', statuslineShim(BAKED)], ['hooks', hook
     assert.doesNotThrow(() => new vm.Script(body), 'valid JS');
 
     // 0. stable Nix profile wins over a stale baked store path
-    assert.match(src, /const nixSystem = '\/run\/current-system\/sw\/share\/graft\/claude'/);
+    assert.match(src, /execFileSync\('\/run\/current-system\/sw\/bin\/graft-claude-dir', \[\]/);
+    assert.match(src, /const nixSystem = nixClaudeDir\(\)/);
     // 1. baked dir is present as the first fallback candidate
     assert.match(src, new RegExp(`const BAKED = "${BAKED}"`));
     // 2. repo node_modules via require.resolve from the project dir

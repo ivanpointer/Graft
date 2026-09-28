@@ -3,7 +3,7 @@
 // call into it — so the real logic lives in the package and upgrades with it.
 //
 // Candidates, cheapest first (no subprocess for 0–3):
-//   0. Nix system profile — a stable current-system link, when Graft was packaged by Nix.
+//   0. Nix system profile — a stable locator command, when Graft was packaged by Nix.
 //   1. `bakedDir`   — the absolute `dist/claude` graft was running from at init time.
 //                     Correct with zero guesswork for whoever ran `graft init`.
 //   2. repo node_modules — a local dev-dep install.
@@ -44,6 +44,16 @@ function globalRoot() {
   } catch { return null; /* npm unavailable */ }
 }
 
+// Nix's system profile exposes executables but does not merge arbitrary share/
+// subdirectories. This tiny companion command prints the package-owned Claude
+// asset directory through the stable /run/current-system profile.
+function nixClaudeDir() {
+  try {
+    const dir = execFileSync('/run/current-system/sw/bin/graft-claude-dir', [], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    return dir || null;
+  } catch { return null; }
+}
+
 // The version of the package a dist/claude dir belongs to, or null if unreadable.
 function versionOf(distClaude) {
   try {
@@ -76,10 +86,10 @@ function best(dirs, name) {
 }
 
 function entry(name) {
-  // Nix rotates store paths on every package build. Its current-system profile is
-  // stable and must win over a still-present, older baked or npm-global package.
-  const nixSystem = '/run/current-system/sw/share/graft/claude';
-  if (fs.existsSync(path.join(nixSystem, name))) return path.join(nixSystem, name);
+  // Nix rotates store paths on every package build. Its current-system locator
+  // is stable and must win over a still-present, older baked or npm-global package.
+  const nixSystem = nixClaudeDir();
+  if (nixSystem && fs.existsSync(path.join(nixSystem, name))) return path.join(nixSystem, name);
 
   // Cheap candidates first, and only shell out to npm when every one of them misses.
   const cheap = [BAKED, fromPkg(dir), fromPkg(path.join(path.dirname(process.execPath), '..', 'lib'))];
