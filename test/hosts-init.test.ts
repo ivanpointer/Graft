@@ -224,6 +224,22 @@ test('CLI: --no-global writes AGENTS.md but leaves ~/.codex alone', () => {
   assert.match(out, /skipped out-of-repo writes/);
 });
 
+test('CLI: GRAFT_NO_GLOBAL_WIRING leaves global config to an external manager', () => {
+  const home = fresh(); const repo = fresh();
+  mkdirSync(join(home, '.codex'), { recursive: true });
+  const previous = process.env.GRAFT_NO_GLOBAL_WIRING;
+  process.env.GRAFT_NO_GLOBAL_WIRING = '1';
+  try {
+    const out = cliStderr(repo, home, ['--agents', 'agents']);
+    assert.ok(existsSync(join(repo, 'AGENTS.md')));
+    assert.deepEqual(readdirSync(join(home, '.codex')), []);
+    assert.match(out, /skipped out-of-repo writes/);
+  } finally {
+    if (previous === undefined) delete process.env.GRAFT_NO_GLOBAL_WIRING;
+    else process.env.GRAFT_NO_GLOBAL_WIRING = previous;
+  }
+});
+
 test('CLI: the graph build is attempted even when claude is not selected', () => {
   const home = fresh(); const repo = fresh();
   mkdirSync(join(home, '.cursor'));
