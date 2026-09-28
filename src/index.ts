@@ -69,6 +69,7 @@ export type {
   DeepBuildPhase,
   PriorMeaning,
   DeepBuildRouteItem,
+  DeepBuildRouteCapabilities,
   DeepBuildRouteInput,
   DeepBuildItemDecision,
   DeepBuildRouter,

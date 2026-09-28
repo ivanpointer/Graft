@@ -166,7 +166,9 @@ test("deep-build router can reuse one prior symbol while recomputing another", a
       concurrency: 1,
       router: { async route(input) {
         assert.equal(input.items.length, 2);
+        assert.equal(input.capabilities?.symbolMeaningReuse, "exact-crux-remap");
         assert.equal(input.items[0].prior?.value, "old keep meaning");
+        assert.equal(input.items[0].prior?.crux, null);
         return input.items.map((item) => ({ key: item.key, action: item.key === "s0" ? "reuse" : "process" }));
       } },
       summarizer: { async describeFile(input) {
@@ -181,6 +183,108 @@ test("deep-build router can reuse one prior symbol while recomputing another", a
   assert.equal(stats.computed, 1);
   assert.equal(current[0].summary, "old keep meaning");
   assert.equal(current[1].summary, "new refresh meaning");
+});
+
+test("deep-build router remaps an unchanged crux after lines shift", async () => {
+  const path = "main.ts";
+  const source = "// inserted comment\nexport function keep() {\n  return stable();\n}\n";
+  const current = [node(`${path}#keep`, path)];
+  current[0].span = "L2-L4";
+  current[0].body_hash = "keep-new";
+  const previous: NodeV1 = {
+    ...current[0], body_hash: "keep-old", summary_state: "ready", summary: "old meaning",
+    crux: { code: "  return stable();", span: "L2-L2" },
+  };
+  let calls = 0;
+  const stats = await enrichGraph(current, new Map([[previous.id, previous]]), new Map([[path, source]]), {
+    concurrency: 1,
+    router: { async route(input) {
+      assert.deepEqual(input.items[0].prior?.crux, { code: "  return stable();", span: "L3-L3" });
+      return [{ key: "s0", action: "reuse" }];
+    } },
+    summarizer: { async describeFile() { calls++; return []; } },
+  });
+  assert.equal(calls, 0);
+  assert.equal(stats.reused, 1);
+  assert.deepEqual(current[0].crux, { code: "  return stable();", span: "L3-L3" });
+});
+
+test("deep-build router cannot reuse a prior meaning when its crux changed", async () => {
+  const path = "main.ts";
+  const source = "export function keep() {\n  return fresh();\n}\n";
+  const current = [node(`${path}#keep`, path)];
+  current[0].span = "L1-L3";
+  current[0].body_hash = "keep-new";
+  const previous: NodeV1 = {
+    ...current[0], body_hash: "keep-old", summary_state: "ready", summary: "old meaning",
+    crux: { code: "  return stale();", span: "L2-L2" },
+  };
+  let calls = 0;
+  const stats = await enrichGraph(current, new Map([[previous.id, previous]]), new Map([[path, source]]), {
+    concurrency: 1,
+    router: { async route(input) {
+      assert.equal(input.items[0].prior, undefined);
+      return [{ key: "s0", action: "reuse" }];
+    } },
+    summarizer: { async describeFile() {
+      calls++;
+      return [{ id: `${path}#keep`, summary: "fresh meaning", crux_start: 2, crux_end: 2 }];
+    } },
+  });
+  assert.equal(calls, 1);
+  assert.equal(stats.reused, 0);
+  assert.equal(stats.computed, 1);
+  assert.equal(current[0].summary, "fresh meaning");
+});
+
+test("deep-build router cannot reuse an ambiguous prior crux", async () => {
+  const path = "main.ts";
+  const source = "export function keep() {\n  audit();\n  audit();\n}\n";
+  const current = [node(`${path}#keep`, path)];
+  current[0].span = "L1-L4";
+  current[0].body_hash = "keep-new";
+  const previous: NodeV1 = {
+    ...current[0], body_hash: "keep-old", summary_state: "ready", summary: "old meaning",
+    crux: { code: "  audit();", span: "L2-L2" },
+  };
+  let calls = 0;
+  const stats = await enrichGraph(current, new Map([[previous.id, previous]]), new Map([[path, source]]), {
+    concurrency: 1,
+    router: { async route(input) {
+      assert.equal(input.items[0].prior, undefined);
+      return [{ key: "s0", action: "reuse" }];
+    } },
+    summarizer: { async describeFile() {
+      calls++;
+      return [{ id: `${path}#keep`, summary: "fresh meaning", crux_start: 2, crux_end: 2 }];
+    } },
+  });
+  assert.equal(calls, 1);
+  assert.equal(stats.reused, 0);
+  assert.equal(stats.computed, 1);
+});
+
+test("deep-build router cannot turn a reuse decision without any eligible prior into a cache hit", async () => {
+  const path = "main.ts";
+  const source = "export function newMeaning() { return 1; }\n";
+  const current = [node(`${path}#newMeaning`, path)];
+  current[0].span = "L1-L1";
+  let calls = 0;
+  const stats = await enrichGraph(current, new Map(), new Map([[path, source]]), {
+    concurrency: 1,
+    router: { async route(input) {
+      assert.equal(input.items[0].prior, undefined);
+      return [{ key: "s0", action: "reuse" }];
+    } },
+    summarizer: { async describeFile() {
+      calls++;
+      return [{ id: `${path}#newMeaning`, summary: "new meaning", crux_start: 0, crux_end: 0 }];
+    } },
+  });
+  assert.equal(calls, 1);
+  assert.equal(stats.reused, 0);
+  assert.equal(stats.computed, 1);
+  assert.equal(current[0].summary, "new meaning");
 });
 
 test("deep-build router can reuse a prior file summary after its source changes", async () => {
