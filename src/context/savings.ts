@@ -14,6 +14,7 @@
  */
 import type { GraphV1 } from '../graph/types.js';
 import { formatDollars } from './price.js';
+import { noteSavings } from '../stats/current.js';
 
 export interface Savings {
   /** How many source files the baseline covers. */
@@ -117,6 +118,7 @@ export function savingsLine(body: string, saved: Savings | undefined): string {
   if (base <= pack) return '';
   const delta = base - pack;
   const pct = Math.round((delta / base) * 100);
+  noteSavings({ savedTokens: delta, baselineTokens: base, outputTokens: pack, sourceFiles: saved.files });
   return (
     `[graft] tokens saved ≈ ${delta.toLocaleString()} (${pct}%) — this output ≈ ` +
     `${pack.toLocaleString()} tok vs reading the ${saved.files} file(s) it covers whole ≈ ` +
