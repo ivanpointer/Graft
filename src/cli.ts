@@ -974,6 +974,42 @@ program
     process.stdout.write(formatRepoMap(map));
   });
 
+/**
+ * Stable process entrypoint for agent hook managers.
+ *
+ * `graft init` still writes tiny package-resolving shims for hosts that need
+ * repo-local wiring, but declarative configuration managers (Home Manager,
+ * chezmoi, enterprise MDM) should not have to copy one of those generated
+ * JavaScript files just to invoke the same hook implementation. Keeping this
+ * on the main executable also means a package upgrade updates hook behavior
+ * without rewriting every host config first.
+ */
+const AGENT_HOOK_EVENTS = [
+  "session-start",
+  "prompt",
+  "post-edit",
+  "stop",
+  "tool-savings",
+  "post-edit-sync",
+  "cursor-post-tool",
+  "cursor-mcp",
+  "cursor-session-end",
+] as const;
+
+program
+  .command("agent-hook")
+  .description("Run one Graft coding-agent hook from stdin (for declarative host configuration)")
+  .argument("<event>", `hook event: ${AGENT_HOOK_EVENTS.join(" | ")}`)
+  .action(async (event: string) => {
+    if (!(AGENT_HOOK_EVENTS as readonly string[]).includes(event)) {
+      console.error(`✗ unknown agent hook event "${event}" — valid: ${AGENT_HOOK_EVENTS.join(", ")}`);
+      process.exitCode = 1;
+      return;
+    }
+    const { main } = await import("./claude/hooks.js");
+    await main(event);
+  });
+
 program
   .command("init")
   .description("Wire Graft into the AI coding agents used with this repo (instruction files + MCP server; full hooks + statusline + MCP for Claude Code)")
