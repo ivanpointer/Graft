@@ -214,16 +214,33 @@ export async function buildContext(dir: string, opts: BuildOptions): Promise<Bui
       return { rel, hash, summary: hit.summary };
     }
     if (opts.router) {
-      const [route] = await opts.router.route({
-        phase: "file-summary",
-        path: rel,
-        items: [{
-          key: "f0",
-          source: code,
-          contentHash: hash,
-          prior: hit ? { contentHash: hit.hash, value: hit.summary } : undefined,
-        }],
-      });
+      // Routing is an optional optimization. A backend outage or malformed
+      // response must not abort the normal file-summary pass.
+      let route: { key: string; action: "process" | "skip" | "reuse" } | undefined;
+      try {
+        const raw = await opts.router.route({
+          phase: "file-summary",
+          path: rel,
+          items: [{
+            key: "f0",
+            source: code,
+            contentHash: hash,
+            prior: hit ? { contentHash: hit.hash, value: hit.summary } : undefined,
+          }],
+        });
+        if (Array.isArray(raw)) {
+          const candidate = raw.find((decision): decision is { key: string; action: "process" | "skip" | "reuse" } =>
+            Boolean(decision) && typeof decision === "object" &&
+            (decision as { key?: unknown }).key === "f0" &&
+            ((decision as { action?: unknown }).action === "process" ||
+              (decision as { action?: unknown }).action === "skip" ||
+              (decision as { action?: unknown }).action === "reuse"),
+          );
+          route = candidate;
+        }
+      } catch {
+        // Fall through to the normal summarizer call.
+      }
       if (route?.key === "f0" && route.action === "reuse" && hit) {
         cache.summaries[rel] = { hash, summary: hit.summary };
         result.reused++;

@@ -187,7 +187,7 @@ test("deep-build router can reuse one prior symbol while recomputing another", a
 
 test("deep-build router remaps an unchanged crux after lines shift", async () => {
   const path = "main.ts";
-  const source = "// inserted comment\nexport function keep() {\n  return stable();\n}\n";
+  const source = "// inserted comment\r\nexport function keep() {\r\n  return stable();\r\n}\r\n";
   const current = [node(`${path}#keep`, path)];
   current[0].span = "L2-L4";
   current[0].body_hash = "keep-new";
@@ -199,14 +199,14 @@ test("deep-build router remaps an unchanged crux after lines shift", async () =>
   const stats = await enrichGraph(current, new Map([[previous.id, previous]]), new Map([[path, source]]), {
     concurrency: 1,
     router: { async route(input) {
-      assert.deepEqual(input.items[0].prior?.crux, { code: "  return stable();", span: "L3-L3" });
+      assert.deepEqual(input.items[0].prior?.crux, { code: "  return stable();\r", span: "L3-L3" });
       return [{ key: "s0", action: "reuse" }];
     } },
     summarizer: { async describeFile() { calls++; return []; } },
   });
   assert.equal(calls, 0);
   assert.equal(stats.reused, 1);
-  assert.deepEqual(current[0].crux, { code: "  return stable();", span: "L3-L3" });
+  assert.deepEqual(current[0].crux, { code: "  return stable();\r", span: "L3-L3" });
 });
 
 test("deep-build router cannot reuse a prior meaning when its crux changed", async () => {
@@ -233,6 +233,7 @@ test("deep-build router cannot reuse a prior meaning when its crux changed", asy
   });
   assert.equal(calls, 1);
   assert.equal(stats.reused, 0);
+  assert.equal(stats.reuseDeclined, 1);
   assert.equal(stats.computed, 1);
   assert.equal(current[0].summary, "fresh meaning");
 });
@@ -261,6 +262,7 @@ test("deep-build router cannot reuse an ambiguous prior crux", async () => {
   });
   assert.equal(calls, 1);
   assert.equal(stats.reused, 0);
+  assert.equal(stats.reuseDeclined, 1);
   assert.equal(stats.computed, 1);
 });
 
@@ -283,8 +285,104 @@ test("deep-build router cannot turn a reuse decision without any eligible prior 
   });
   assert.equal(calls, 1);
   assert.equal(stats.reused, 0);
+  assert.equal(stats.reuseDeclined, 1);
   assert.equal(stats.computed, 1);
   assert.equal(current[0].summary, "new meaning");
+});
+
+test("deep-build router withholds malformed cruxes and blank summaries from reuse", async () => {
+  const path = "main.ts";
+  const source = "export function malformed() { return 1; }\nexport function blank() { return 2; }\n";
+  const current = [node(`${path}#malformed`, path), node(`${path}#blank`, path)];
+  current[0].span = "L1-L1";
+  current[1].span = "L2-L2";
+  const malformed: NodeV1 = {
+    ...current[0], body_hash: "old-malformed", summary_state: "ready", summary: "old meaning",
+    crux: { code: 7, span: "L1-L1" } as unknown as NodeV1["crux"],
+  };
+  const blank: NodeV1 = {
+    ...current[1], body_hash: "old-blank", summary_state: "ready", summary: "   ", crux: null,
+  };
+  let calls = 0;
+  const stats = await enrichGraph(current, new Map([[malformed.id, malformed], [blank.id, blank]]), new Map([[path, source]]), {
+    concurrency: 1,
+    router: { async route(input) {
+      assert.equal(input.items[0].prior, undefined);
+      assert.equal(input.items[1].prior, undefined);
+      return input.items.map((item) => ({ key: item.key, action: "reuse" }));
+    } },
+    summarizer: { async describeFile(input) {
+      calls++;
+      return input.nodes.map((value, index) => ({
+        id: value.id, summary: `fresh ${index}`, crux_start: 0, crux_end: 0,
+      }));
+    } },
+  });
+  assert.equal(calls, 1);
+  assert.equal(stats.reused, 0);
+  assert.equal(stats.reuseDeclined, 2);
+  assert.equal(stats.computed, 2);
+});
+
+test("deep-build router exceptions fail open to the normal crux pass", async () => {
+  const path = "main.ts";
+  const source = "export function run() { return 1; }\n";
+  const current = [node(`${path}#run`, path)];
+  current[0].span = "L1-L1";
+  let calls = 0;
+  const stats = await enrichGraph(current, new Map(), new Map([[path, source]]), {
+    concurrency: 1,
+    router: { async route() { throw new Error("decision service unavailable"); } },
+    summarizer: { async describeFile() {
+      calls++;
+      return [{ id: `${path}#run`, summary: "fresh", crux_start: 0, crux_end: 0 }];
+    } },
+  });
+  assert.equal(calls, 1);
+  assert.equal(stats.computed, 1);
+});
+
+test("deep-build router non-array output fails open to the normal crux pass", async () => {
+  const path = "main.ts";
+  const source = "export function run() { return 1; }\n";
+  const current = [node(`${path}#run`, path)];
+  current[0].span = "L1-L1";
+  let calls = 0;
+  const stats = await enrichGraph(current, new Map(), new Map([[path, source]]), {
+    concurrency: 1,
+    router: { async route() { return { action: "reuse" } as never; } },
+    summarizer: { async describeFile() {
+      calls++;
+      return [{ id: `${path}#run`, summary: "fresh", crux_start: 0, crux_end: 0 }];
+    } },
+  });
+  assert.equal(calls, 1);
+  assert.equal(stats.computed, 1);
+});
+
+test("file-summary router failures and malformed output fail open", async () => {
+  for (const [label, router] of [
+    ["throws", { async route() { throw new Error("decision service unavailable"); } }],
+    ["returns non-array", { async route() { return { action: "reuse" } as never; } }],
+  ] as const) {
+    const repo = tmpRepo(`decision-route-file-${label}`);
+    const file = join(repo, "main.ts");
+    writeFileSync(file, "export const value = 1;\n");
+    await new Graft({
+      summarizer: { async summarize() { return "old summary"; } },
+      synthesizer: { async synthesize() { return []; } },
+    }).init(repo);
+    writeFileSync(file, "export const value = 2;\n");
+    let calls = 0;
+    const result = await new Graft({
+      summarizer: { async summarize() { calls++; return "fresh summary"; } },
+      synthesizer: { async synthesize() { return []; } },
+      deepBuildRouter: router,
+    }).init(repo);
+    assert.equal(calls, 1, label);
+    assert.equal(result.summarized, 1, label);
+    assert.equal(result.reused, 0, label);
+  }
 });
 
 test("deep-build router can reuse a prior file summary after its source changes", async () => {

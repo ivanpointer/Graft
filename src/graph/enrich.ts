@@ -59,6 +59,8 @@ function checkpointMs(): number {
 export interface EnrichStats {
   cached: number; // carried over from a prior identical body
   reused: number; // prior meaning accepted for a changed body by the router
+  /** Router `reuse` decisions rejected because no prior passed crux remapping. */
+  reuseDeclined: number;
   computed: number; // freshly summarized by the LLM this run
   stale: number; // body changed, left with an outdated summary (no LLM this run)
   pending: number; // never summarized and not computed this run
@@ -86,6 +88,7 @@ export async function enrichGraph(
   const stats: EnrichStats = {
     cached: 0,
     reused: 0,
+    reuseDeclined: 0,
     computed: 0,
     stale: 0,
     pending: 0,
@@ -189,25 +192,38 @@ export async function enrichGraph(
       ? refs.map((ref, index) => priorForReuse(prior.get(fileNodes[index].id), ref, sourceLines))
       : [];
     if (opts.router) {
-      const raw = await opts.router.route({
-        phase: "symbol-meaning",
-        path,
-        capabilities: { symbolMeaningReuse: "exact-crux-remap" },
-        items: refs.map((ref, index) => {
-          const node = fileNodes[index];
-          return {
-            key: `s${index}`,
-            source: sourceLines.slice(ref.startLine - 1, ref.endLine).join("\n"),
-            contentHash: node.body_hash,
-            prior: reusablePriors[index],
-          };
-        }),
-      });
-      for (const decision of raw) {
-        if (!/^s\d+$/.test(decision.key) || decisions.has(decision.key)) continue;
-        const index = Number(decision.key.slice(1));
-        if (index < 0 || index >= fileNodes.length) continue;
-        decisions.set(decision.key, decision.action);
+      // A decision backend is optional optimization. Its transport or output
+      // must never turn a deep build into a failure: invalid output and errors
+      // simply leave every item on the normal crux path.
+      try {
+        const raw = await opts.router.route({
+          phase: "symbol-meaning",
+          path,
+          capabilities: { symbolMeaningReuse: "exact-crux-remap" },
+          items: refs.map((ref, index) => {
+            const node = fileNodes[index];
+            return {
+              key: `s${index}`,
+              source: sourceLines.slice(ref.startLine - 1, ref.endLine).join("\n"),
+              contentHash: node.body_hash,
+              prior: reusablePriors[index],
+            };
+          }),
+        });
+        if (Array.isArray(raw)) {
+          for (const decision of raw) {
+            if (!decision || typeof decision !== "object") continue;
+            const { key, action } = decision as { key?: unknown; action?: unknown };
+            if (typeof key !== "string" || typeof action !== "string") continue;
+            if (!/^s\d+$/.test(key) || decisions.has(key)) continue;
+            const index = Number(key.slice(1));
+            if (index < 0 || index >= fileNodes.length) continue;
+            if (action !== "process" && action !== "skip" && action !== "reuse") continue;
+            decisions.set(key, action);
+          }
+        }
+      } catch {
+        // Fail open to the normal crux pass; the router is never authoritative.
       }
     }
 
@@ -222,6 +238,7 @@ export async function enrichGraph(
         stats.reused++;
         continue;
       }
+      if (action === "reuse") stats.reuseDeclined++;
       if (action === "skip") {
         routed = true;
         if (node.summary_state === "stale") stats.stale++;
@@ -372,20 +389,22 @@ function buildCrux(r: NodeCrux, node: NodeV1, source: string, lineCount: number)
 }
 
 /**
- * Return a prior artifact only when reusing it cannot also copy a stale crux.
+ * Return a prior artifact only when reusing it cannot also copy a stale crux
+ * pointer. This verifies coordinates only; semantic relevance remains the
+ * router's decision.
  *
  * A crux is stored as verbatim whole source lines. Instead of trusting its old
- * line pointer, find that exact text in the current node's span and require one
- * line-boundary-aligned match. A missing crux is safe to reuse; an unmatched or
- * repeated non-null crux is intentionally withheld from the hook and cannot be
- * promoted by a malicious or mistaken `reuse` decision.
+ * line pointer, find those exact lines (apart from their line endings) in the
+ * current node span and require one match. A missing crux may be reused; an
+ * unmatched or repeated non-null crux is intentionally withheld from the hook
+ * and cannot be promoted by a malicious or mistaken `reuse` decision.
  */
 function priorForReuse(
   was: NodeV1 | undefined,
   node: NodeRef,
   sourceLines: readonly string[],
 ): PriorMeaning | undefined {
-  if (was?.summary_state !== "ready" || !was.summary) return undefined;
+  if (was?.summary_state !== "ready" || typeof was.summary !== "string" || !was.summary.trim()) return undefined;
   const crux = remapCrux(was.crux, node, sourceLines);
   if (crux === undefined) return undefined;
   return { contentHash: was.body_hash, value: was.summary, crux };
@@ -398,32 +417,39 @@ function remapCrux(
   sourceLines: readonly string[],
 ): Crux | null | undefined {
   if (prior === null) return null;
-  if (!prior) return undefined;
+  if (!isStoredCrux(prior)) return undefined;
   // `buildCrux()` never emits an empty or newline-terminated excerpt. Reject
   // malformed persisted data rather than allowing an empty string to match at
   // every offset or a partial-line match to manufacture a span.
   if (!prior.code.trim() || prior.code.endsWith("\n")) return undefined;
 
-  const current = sourceLines.slice(node.startLine - 1, node.endLine).join("\n");
+  const wantedLines = prior.code
+    .split("\n")
+    .map((line) => line.endsWith("\r") ? line.slice(0, -1) : line);
+  const currentLines = sourceLines
+    .slice(node.startLine - 1, node.endLine)
+    .map((line) => line.endsWith("\r") ? line.slice(0, -1) : line);
   let match: number | undefined;
-  let from = 0;
-  while (from < current.length) {
-    const at = current.indexOf(prior.code, from);
-    if (at < 0) break;
-    const end = at + prior.code.length;
-    const startsLine = at === 0 || current[at - 1] === "\n";
-    const endsLine = end === current.length || current[end] === "\n";
-    if (startsLine && endsLine) {
-      if (match !== undefined) return undefined; // duplicate excerpts are ambiguous
-      match = at;
-    }
-    from = at + 1;
+  for (let start = 0; start <= currentLines.length - wantedLines.length; start++) {
+    if (!wantedLines.every((line, index) => currentLines[start + index] === line)) continue;
+    if (match !== undefined) return undefined; // duplicate excerpts are ambiguous
+    match = start;
   }
   if (match === undefined) return undefined;
 
-  const start = node.startLine + current.slice(0, match).split("\n").length - 1;
-  const end = start + prior.code.split("\n").length - 1;
-  return { code: prior.code, span: `L${start}-L${end}` };
+  const start = node.startLine + match;
+  const end = start + wantedLines.length - 1;
+  return {
+    code: sourceLines.slice(start - 1, end).join("\n"),
+    span: `L${start}-L${end}`,
+  };
+}
+
+/** Persisted graph JSON is untyped; only a literal `null` means no crux. */
+function isStoredCrux(value: unknown): value is Crux {
+  return Boolean(value) && typeof value === "object" &&
+    typeof (value as { code?: unknown }).code === "string" &&
+    typeof (value as { span?: unknown }).span === "string";
 }
 
 /** Parse a `"L12-L30"` span into a clamped [start, end] line pair (1-based). */

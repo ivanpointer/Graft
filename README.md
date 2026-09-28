@@ -623,9 +623,10 @@ new content hash. Reuse is ignored when no prior artifact exists; unknown and
 duplicate keys also fall back to `process`. Symbol requests advertise
 `capabilities.symbolMeaningReuse: "exact-crux-remap"`: a supplied prior crux is
 either `null` or has been exact-matched uniquely inside the current symbol, with
-its span remapped to current source lines. When that proof is unavailable, graft
-withholds the prior and ignores `reuse`. This lets a bounded semantic backend save
-paid work without generating summaries or graph data itself.
+its span remapped to current source lines. This proves the excerpt's coordinates,
+not that a prior summary remains semantically relevant. When coordinate proof is
+unavailable, graft withholds the prior and ignores `reuse`. This lets a bounded
+semantic backend save paid work without generating summaries or graph data itself.
 
 The selected path is recorded as `hooks` in `.graft/config.json`. A later build
 or query auto-loads it only when it is an absolute path outside the indexed repository.
