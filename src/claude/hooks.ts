@@ -16,16 +16,22 @@ import { classifyToolUse, isMcpToolName, isGraftMcpTool, parseSavings, recordToo
 import { recordHookRun, recordToolObservation } from '../stats/store.js';
 import { recordHarnessConfiguration } from '../stats/config.js';
 
-const INVOCATION_ID = /\[graft\] invocation_id=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?![0-9a-f-])/gi;
+const INVOCATION_ID_LINE = /^\[graft\] invocation_id=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\r?$/gim;
 
 /** Inspect only a tool's returned value, never its command or surrounding hook input. */
 export function invocationIdFromResponse(response: unknown): string | undefined {
   const ids = new Set<string>();
   const seen = new Set<object>();
   function visit(value: unknown, depth: number): void {
-    if (depth > 8 || ids.size > 1) return;
+    if (depth > 16 || ids.size > 1) return;
     if (typeof value === 'string') {
-      for (const match of value.matchAll(INVOCATION_ID)) ids.add(match[1].toLowerCase());
+      for (const match of value.matchAll(INVOCATION_ID_LINE)) ids.add(match[1].toLowerCase());
+      // Code-mode and Cursor can stringify a nested MCP result before putting it
+      // in the hook response. Parse that envelope so line boundaries in its text
+      // blocks are checked after JSON unescaping.
+      if (ids.size <= 1 && /^[\s]*[\[{]/.test(value) && value.length <= 2_000_000) {
+        try { visit(JSON.parse(value), depth + 1); } catch { /* ordinary tool text */ }
+      }
       return;
     }
     if (!value || typeof value !== 'object' || seen.has(value)) return;

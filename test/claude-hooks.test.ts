@@ -498,9 +498,14 @@ test('invocation marker is parsed from CLI stderr and nested MCP result content'
   assert.equal(invocationIdFromResponse({ stdout: 'answer', stderr: marker }), INVOCATION);
   assert.equal(invocationIdFromResponse({ content: [{ type: 'text', text: marker }] }), INVOCATION);
   assert.equal(invocationIdFromResponse(JSON.stringify({ result: { text: marker } })), INVOCATION);
+  assert.equal(invocationIdFromResponse({ output: { content: [{ type: 'text', text: JSON.stringify({
+    result: { content: [{ type: 'text', text: `${marker}\nanswer` }] },
+  }) }] } }), INVOCATION, 'code-mode result nested inside a JSON text block');
   assert.equal(invocationIdFromResponse({ text: `${marker}\n${marker}` }), INVOCATION);
   assert.equal(invocationIdFromResponse({ text: `${marker}\n[graft] invocation_id=00000000-0000-4000-8000-000000000001` }), undefined);
   assert.equal(invocationIdFromResponse({ text: '[graft] invocation_id=not-a-uuid' }), undefined);
+  assert.equal(invocationIdFromResponse({ text: `quoted ${marker}` }), undefined, 'marker must occupy its own line');
+  assert.equal(invocationIdFromResponse({ text: 'no invocation marker' }), undefined);
 });
 
 test('host tool metadata is tied to a response marker and native per-call fields', async () => {
