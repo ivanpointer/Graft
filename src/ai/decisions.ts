@@ -137,6 +137,24 @@ export interface PriorMeaning {
   crux?: Crux | null;
 }
 
+/** One side of a bounded source window. Line numbers are one-based. */
+export interface DeepBuildSourceWindow {
+  startLine: number;
+  lineCount: number;
+  code: string;
+}
+
+/**
+ * A complete changed region, plus bounded unchanged context on each side.
+ * Every changed line is present; callers omit the context rather than truncate
+ * it when the changed region itself exceeds their disclosure budget.
+ */
+export interface DeepBuildChangeContext {
+  kind: "complete-line-window-v1";
+  previous: DeepBuildSourceWindow;
+  current: DeepBuildSourceWindow;
+}
+
 export interface DeepBuildRouteItem {
   /** Opaque key that identifies the item within this request. */
   key: string;
@@ -144,10 +162,18 @@ export interface DeepBuildRouteItem {
   contentHash: string;
   /** The last ready meaning, when the source changed since it was produced. */
   prior?: PriorMeaning;
+  /** Bounded old/new evidence for evaluating whether the prior is still valid. */
+  change?: DeepBuildChangeContext;
 }
 
 /** Optional guarantees made by the caller for a deep-build routing request. */
 export interface DeepBuildRouteCapabilities {
+  /**
+   * Changed file-summary items may carry every changed line from both the
+   * previous and current source, plus bounded unchanged context. An absent
+   * item context means that guarantee could not be made within the host limit.
+   */
+  fileSummaryChangeContext?: "complete-line-window-v1";
   /**
    * A symbol prior either has no crux or carries an excerpt whose exact lines
    * were found uniquely in the current node span. Its coordinates therefore
