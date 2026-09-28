@@ -241,13 +241,13 @@ export async function callTool(
     const fed = ws ? await callWorkspaceTool(root, dirOverride, name, args) : null;
     const res = fed ?? (await callSingleTool(root, name, args, dirOverride));
     const result = note ? { ...res, text: `${note}\n${res.text}` } : res;
-    recordInvocation({
+    await recordInvocation({
       command: name, surface: 'mcp', repo: root, host: 'mcp', ok: !result.isError,
       durationMs: Date.now() - startedAt, savedTokens: sumSavingsFooters(result.text),
     });
     return result;
   } catch (err) {
-    recordInvocation({
+    await recordInvocation({
       command: canonicalName, surface: 'mcp', repo: root, host: 'mcp', ok: false,
       durationMs: Date.now() - startedAt,
     });

@@ -252,7 +252,7 @@ program.hook("preAction", (_parent, action) => {
  * `process.exit` never reaches here and is simply not counted — under-reporting
  * is the right failure mode for a metric.
  */
-program.hook("postAction", (_parent, action) => {
+program.hook("postAction", async (_parent, action) => {
   const name = action.name();
   const observation = takeInvocation();
   if (isTrackedCommand(name)) {
@@ -262,7 +262,7 @@ program.hook("postAction", (_parent, action) => {
   // change merely because it was viewed. Internal maintenance commands are not
   // user work either.
   if (name === "stats" || name.startsWith("_")) return;
-  recordInvocation({
+  await recordInvocation({
     command: name,
     surface: "cli",
     repo: queryNote.repo ?? observation?.repo,
@@ -728,7 +728,7 @@ program
   .option("--json", "output the session stats as JSON")
   .option("--machine", "report exact machine-local Graft usage instead of the latest agent session")
   .option("--since <days>", "with --machine, include only the last N days")
-  .action((dirArg: string | undefined, opts: { json?: boolean; machine?: boolean; since?: string }) => {
+  .action(async (dirArg: string | undefined, opts: { json?: boolean; machine?: boolean; since?: string }) => {
     if (opts.machine) {
       const rawDays = opts.since === undefined ? undefined : Number(opts.since);
       if (rawDays !== undefined && (!Number.isFinite(rawDays) || rawDays < 0)) {
@@ -736,7 +736,7 @@ program
         process.exitCode = 1;
         return;
       }
-      const report = readStatsReport({ sinceDays: rawDays });
+      const report = await readStatsReport({ sinceDays: rawDays });
       console.log(opts.json ? JSON.stringify(report, null, 2) : formatStatsReport(report));
       return;
     }
