@@ -377,3 +377,39 @@ test("an explicit deep build reads through the main worktree's paid cache", asyn
   rmSync(main, { recursive: true, force: true });
   rmSync(wt, { recursive: true, force: true });
 });
+
+test("a changed worktree file can route from the main worktree's prior summary", async () => {
+  const main = gitRepo();
+  await buildContext(main, {
+    model: "fake",
+    summarizer: { async summarize() { return "parent meaning"; } },
+    synthesizer: { async synthesize() { return []; } },
+  });
+  const wt = addWorktree(main, "deep-route");
+  writeFileSync(join(wt, "src", "math.ts"), `${MATH}${MUL}`);
+  let summaryCalls = 0;
+  let routeCalls = 0;
+
+  const result = await buildContext(wt, {
+    model: "fake",
+    summarizer: { async summarize() { summaryCalls++; return "unexpected"; } },
+    synthesizer: { async synthesize() { return []; } },
+    router: { async route(input) {
+      routeCalls++;
+      assert.equal(input.phase, "file-summary");
+      assert.equal(input.items[0]?.prior?.value, "parent meaning");
+      assert.equal(input.items[0]?.change?.kind, "complete-line-hunks-v1");
+      assert.deepEqual(input.capabilities, {
+        fileSummaryChangeContext: "complete-line-hunks-v1",
+      });
+      return [{ key: input.items[0]!.key, action: "reuse" }];
+    } },
+  });
+
+  assert.equal(routeCalls, 1, "the seeded prior is offered to the router");
+  assert.equal(summaryCalls, 0, "reuse avoids a paid summary call");
+  assert.equal(result.reused, 1);
+
+  rmSync(main, { recursive: true, force: true });
+  rmSync(wt, { recursive: true, force: true });
+});

@@ -219,27 +219,28 @@ export async function buildContext(dir: string, opts: BuildOptions): Promise<Bui
     const hash = contentHash(code);
     const local = cache.summaries[rel];
     const seeded = seedCache.summaries[rel];
-    const hit = local?.hash === hash
+    const prior = local ?? seeded;
+    const exact = local?.hash === hash
       ? local
       : seeded?.hash === hash ? seeded : undefined;
-    if (hit && hit.hash === hash) {
+    if (exact) {
       // Gradually upgrade legacy cache entries so the next changed build can
       // offer a trustworthy old/new window without another model call. Promote
       // a branch-seeded hit into the local cache at the same time, so later
       // checkpoints and builds no longer depend on the sibling worktree.
-      cache.summaries[rel] = hit.source === code ? hit : { ...hit, source: code };
-      if (hit !== local || hit.source !== code) {
+      cache.summaries[rel] = exact.source === code ? exact : { ...exact, source: code };
+      if (exact !== local || exact.source !== code) {
         maybeFlush();
       }
       result.cached++;
-      return { rel, hash, summary: hit.summary };
+      return { rel, hash, summary: exact.summary };
     }
     if (opts.router) {
       // Routing is an optional optimization. A backend outage or malformed
       // response must not abort the normal file-summary pass.
       let route: { key: string; action: "process" | "skip" | "reuse" } | undefined;
       try {
-        const priorSource = typeof hit?.source === "string" ? hit.source : undefined;
+        const priorSource = typeof prior?.source === "string" ? prior.source : undefined;
         const change = priorSource !== undefined
           ? completeLineChangeContext(priorSource, code)
           : undefined;
@@ -250,7 +251,7 @@ export async function buildContext(dir: string, opts: BuildOptions): Promise<Bui
             key: "f0",
             source: code,
             contentHash: hash,
-            prior: hit ? { contentHash: hit.hash, value: hit.summary } : undefined,
+            prior: prior ? { contentHash: prior.hash, value: prior.summary } : undefined,
             ...(change ? { change } : {}),
           }],
           ...(priorSource !== undefined
@@ -270,11 +271,11 @@ export async function buildContext(dir: string, opts: BuildOptions): Promise<Bui
       } catch {
         // Fall through to the normal summarizer call.
       }
-      if (route?.key === "f0" && route.action === "reuse" && hit) {
-        cache.summaries[rel] = { hash, summary: hit.summary, source: code };
+      if (route?.key === "f0" && route.action === "reuse" && prior) {
+        cache.summaries[rel] = { hash, summary: prior.summary, source: code };
         result.reused++;
         maybeFlush();
-        return { rel, hash, summary: hit.summary };
+        return { rel, hash, summary: prior.summary };
       }
       if (route?.key === "f0" && route.action === "skip") {
         result.routedFiles++;
