@@ -18,6 +18,7 @@ import { join, resolve } from "node:path";
 import matter from "gray-matter";
 import { contextDirFor } from "../context/node-file.js";
 import { withSavings, savingsFor, savingsTurnNudge, type Savings } from "../context/savings.js";
+import { noteSavings } from "../stats/current.js";
 import { loadGraphCached, loadAskIndexCached } from "../graph/load.js";
 import {
   assertPrefixIndexed,
@@ -1560,6 +1561,7 @@ function askSavingsLine(r: AskResult, body: string): string {
   if (base <= pack) return ""; // no saving to claim (tiny files); stay quiet
   const saved = base - pack;
   const pct = Math.round((saved / base) * 100);
+  noteSavings({ savedTokens: saved, baselineTokens: base, outputTokens: pack, sourceFiles: r.saved.files });
   return (
     `[graft] tokens saved ≈ ${saved.toLocaleString()} (${pct}%) — this pack ≈ ` +
     `${pack.toLocaleString()} tok vs reading the ${r.saved.files} source file(s) whole ≈ ` +

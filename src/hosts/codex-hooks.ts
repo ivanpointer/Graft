@@ -42,6 +42,7 @@ export function hookTargets(home: string): PlannedWrite[] {
  *   - SessionStart → orientation from `graft/INDEX.md`
  *   - UserPromptSubmit → the coupling-seed retrieval pack (the accuracy hook)
  *   - PostToolUse (an edit) → blast radius + mark the graph dirty
+ *   - PostToolUse (a retrieval/read) → session usage and savings accounting
  *   - Stop → one background graph sync at turn end (not after every edit)
  * `matcher` is omitted where Codex ignores it (UserPromptSubmit, Stop). The edit
  * matcher includes `apply_patch` — Codex's native edit tool — alongside the
@@ -54,6 +55,10 @@ function desiredEntries(): DesiredEntry[] {
     { event: 'SessionStart', matcher: 'startup|resume|compact', sub: 'session-start', timeout: 10000 },
     { event: 'UserPromptSubmit', sub: 'prompt', timeout: 15000 },
     { event: 'PostToolUse', matcher: 'apply_patch|Write|Edit|MultiEdit', sub: 'post-edit', timeout: 10000 },
+    // Match the same retrieval/read vocabulary Claude Code's hook uses. The
+    // handler no-ops for unrelated tools, while this lets Codex sessions gain
+    // the existing graft-vs-source and reported-savings accounting.
+    { event: 'PostToolUse', matcher: 'Bash|Shell|mcp__graft__|Read|Grep|Glob', sub: 'tool-savings', timeout: 8000 },
     { event: 'Stop', sub: 'stop', timeout: 10000 },
   ];
 }
@@ -74,14 +79,17 @@ export function installCodexHooks(home: string): ConfigWrite[] {
   const hooks = (root.hooks ??= {});
   if (typeof hooks !== 'object' || hooks === null || Array.isArray(hooks)) return [shimWrite, skipped];
 
-  for (const d of desiredEntries()) {
-    if (hooks[d.event] !== undefined && !Array.isArray(hooks[d.event])) return [shimWrite, skipped];
-    const prior: unknown[] = Array.isArray(hooks[d.event]) ? hooks[d.event] : [];
-    const handler = { type: 'command', command: `node "${shimPath}" ${d.sub}`, timeout: d.timeout };
-    const entry = d.matcher ? { matcher: d.matcher, hooks: [handler] } : { hooks: [handler] };
-    // Preserve foreign entries in this event; replace any prior graft entry so an
-    // upgrade re-points to the current shim/sub-command instead of stacking.
-    hooks[d.event] = [...prior.filter((e) => !isGraftEntry(e)), entry];
+  for (const event of new Set(desiredEntries().map((d) => d.event))) {
+    if (hooks[event] !== undefined && !Array.isArray(hooks[event])) return [shimWrite, skipped];
+    const prior: unknown[] = Array.isArray(hooks[event]) ? hooks[event] : [];
+    const desired = desiredEntries().filter((d) => d.event === event).map((d) => {
+      const handler = { type: 'command', command: `node "${shimPath}" ${d.sub}`, timeout: d.timeout };
+      return d.matcher ? { matcher: d.matcher, hooks: [handler] } : { hooks: [handler] };
+    });
+    // Preserve foreign entries in this event; replace the complete graft-owned
+    // set together. PostToolUse owns both edit and retrieval hooks, so replacing
+    // one at a time would make the later entry erase the earlier one.
+    hooks[event] = [...prior.filter((e) => !isGraftEntry(e)), ...desired];
   }
 
   if (JSON.stringify(root) === before) return [shimWrite, { id: 'codex-hooks', path: cfgPath, action: 'unchanged' }];
