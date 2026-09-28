@@ -36,6 +36,7 @@ import { dollarsSaved, formatDollars } from '../context/price.js';
 import { readSession, writeSession, sessionDir, listSessionIds, type SessionState } from './state.js';
 import type { AgentHost } from '../telemetry/contract.js';
 import { GRAFT_MCP_TOOL_NAMES } from '../mcp/tool-names.js';
+import { recordToolObservation } from '../stats/store.js';
 
 export type ToolKind = 'graft' | 'source';
 
@@ -125,21 +126,26 @@ export interface ToolUse {
  * undercount by one, never corruption thanks to the atomic write), and a lock
  * here would contend with the build lock these hooks also touch.
  */
-export function recordToolUse(dir: string, sessionId: string, use: ToolUse): void {
+export async function recordToolUse(dir: string, sessionId: string, use: ToolUse): Promise<void> {
   const saved = use.savedTokens ?? 0;
-  if (!use.kind && saved <= 0) return;
+  const kind = use.kind ?? (saved > 0 ? 'graft' : null);
+  if (!kind) return;
   const id = sessionId || 'default';
   const s = readSession(dir, id);
-  if (use.kind === 'graft') s.graftReads = (s.graftReads ?? 0) + 1;
-  else if (use.kind === 'source') s.sourceReads = (s.sourceReads ?? 0) + 1;
+  if (kind === 'graft') s.graftReads = (s.graftReads ?? 0) + 1;
+  else if (kind === 'source') s.sourceReads = (s.sourceReads ?? 0) + 1;
   if (saved > 0) s.savedTokens = (s.savedTokens ?? 0) + saved;
   // A graft use owes a tally in this turn's reply; the Stop hook (countTallyTurn)
   // resolves whether it got one and clears the flag. A flag, not a count — a turn
   // with several graft calls is still one reply to the user.
-  if (use.kind === 'graft') s.turnUsedGraft = true;
+  if (kind === 'graft') s.turnUsedGraft = true;
   // Stamp the host once; the first tool use that lands owns the attribution.
   if (use.host && !s.host) s.host = use.host;
   writeSession(dir, id, s);
+  // The session file remains the live operational state; this append-only fact
+  // is the machine-wide adoption record. It deliberately does not add to the
+  // authoritative CLI/MCP saved-token total in `invocations`.
+  await recordToolObservation({ repo: dir, sessionId: id, host: use.host, kind, savedTokens: saved });
 }
 
 export interface SessionSummary extends SessionState {

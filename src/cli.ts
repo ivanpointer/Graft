@@ -62,6 +62,8 @@ import { patchBuildConfig, readBuildConfig, type BuildConfig } from "./util/stat
 import { normalizePathPrefix } from "./util/paths.js";
 import { latestSession, formatSessionStats, sessionInputRate } from "./claude/session-metrics.js";
 import { setInputRate } from "./context/savings.js";
+import { beginInvocation, takeInvocation } from "./stats/current.js";
+import { formatStatsReport, readStatsReport, recordInvocation } from "./stats/store.js";
 import { formatUpdateNudge, maybeRefreshInBackground, readUpdateCache, refreshUpdateCache, wiredHostIds, writeStamp } from "./upkeep.js";
 import {
   errorCode,
@@ -248,6 +250,7 @@ const UPKEEP_SKIP = new Set(["version", "upgrade", "_update-check", "_brain-refr
  * cache filler for the hooks, which are not allowed to touch the network.
  */
 program.hook("preAction", (_parent, action) => {
+  beginInvocation();
   if (UPKEEP_SKIP.has(action.name())) return;
   maybeRefreshInBackground();
   const nudge = formatUpdateNudge(currentVersion, readUpdateCache()?.latest);
@@ -267,10 +270,28 @@ program.hook("preAction", (_parent, action) => {
  * `process.exit` never reaches here and is simply not counted — under-reporting
  * is the right failure mode for a metric.
  */
-program.hook("postAction", (_parent, action) => {
+program.hook("postAction", async (_parent, action) => {
   const name = action.name();
-  if (!isTrackedCommand(name)) return;
-  track("query", { command: name, surface: "cli", hit: queryNote.hit }, { repo: queryNote.repo });
+  const observation = takeInvocation();
+  if (isTrackedCommand(name)) {
+    track("query", { command: name, surface: "cli", hit: queryNote.hit }, { repo: queryNote.repo });
+  }
+  // `stats` reads this database; recording the read would make the report
+  // change merely because it was viewed. Internal maintenance commands are not
+  // user work either.
+  if (name === "stats" || name.startsWith("_")) return;
+  await recordInvocation({
+    command: name,
+    surface: "cli",
+    repo: queryNote.repo ?? observation?.repo,
+    host: "cli",
+    hit: queryNote.hit === undefined ? undefined : queryNote.hit === "yes",
+    durationMs: observation ? Date.now() - observation.startedAt : undefined,
+    savedTokens: observation?.savedTokens,
+    baselineTokens: observation?.baselineTokens,
+    outputTokens: observation?.outputTokens,
+    sourceFiles: observation?.sourceFiles,
+  });
 });
 
 // Hidden from --help: only ever spawned detached by maybeRefreshInBackground.
@@ -735,7 +756,20 @@ program
   .description("Show this agent session's graft-vs-source usage mix and tokens saved")
   .argument(...DIR_ARG)
   .option("--json", "output the session stats as JSON")
-  .action((dirArg: string | undefined, opts: { json?: boolean }) => {
+  .option("--machine", "report exact machine-local Graft usage instead of the latest agent session")
+  .option("--since <days>", "with --machine, include only the last N days")
+  .action(async (dirArg: string | undefined, opts: { json?: boolean; machine?: boolean; since?: string }) => {
+    if (opts.machine) {
+      const rawDays = opts.since === undefined ? undefined : Number(opts.since);
+      if (rawDays !== undefined && (!Number.isFinite(rawDays) || rawDays < 0)) {
+        console.error("✗ --since must be a non-negative number of days");
+        process.exitCode = 1;
+        return;
+      }
+      const report = await readStatsReport({ sinceDays: rawDays });
+      console.log(opts.json ? JSON.stringify(report, null, 2) : formatStatsReport(report));
+      return;
+    }
     // Reads local session JSON only — no graph, no network. This is how a Cursor
     // user (no statusline) sees the numbers the Claude Code bar would show, and it
     // works under DO_NOT_TRACK because it never touches telemetry.
