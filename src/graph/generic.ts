@@ -59,7 +59,9 @@ export const GENERIC_LANGS: readonly GenericLang[] = [
   { name: "clojure", exts: [".clj", ".cljs", ".cljc", ".bb"], wasm: "clojure" },
   { name: "nix", exts: [".nix"], wasm: "nix" },
   { name: "lua", exts: [".lua"], wasm: "lua" },
-  { name: "terraform", exts: [".tf", ".tfvars", ".hcl"], wasm: "terraform" },
+  // .tfvars commonly contains credentials. Keep it out of graph extraction and
+  // the deep meaning pass until both can honor an explicit sensitive-file opt-in.
+  { name: "terraform", exts: [".tf", ".hcl"], wasm: "terraform" },
 ];
 
 const byExt = new Map<string, GenericLang>();

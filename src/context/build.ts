@@ -45,7 +45,7 @@ export const CODE_EXTENSIONS = [
   ".py", ".go", ".rs", ".java", ".kt", ".scala",
   ".rb", ".php", ".c", ".h", ".cpp", ".hpp", ".cc",
   ".cs", ".swift", ".sql", ".sh", ".proto",
-  ".tf", ".tfvars", ".hcl",
+  ".tf", ".hcl",
 ];
 
 /** Char budget of summary text per synthesis call (keeps each call in-context). */

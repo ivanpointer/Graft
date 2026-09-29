@@ -1,8 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { CODE_EXTENSIONS, listContextFiles } from "../src/context/build.js";
 import { contextDirFor } from "../src/context/node-file.js";
 import { buildGraph } from "../src/graph/build.js";
 import { extractGeneric, genericLangOf, isWarm, warmGenericGrammars } from "../src/graph/generic.js";
@@ -25,11 +27,13 @@ output "bucket" { value = aws_s3_bucket.logs.id }
 `;
 
 test("Terraform and HCL extensions are routed to the bundled grammar", () => {
-  for (const ext of [".tf", ".tfvars", ".hcl"]) {
+  for (const ext of [".tf", ".hcl"]) {
     assert.equal(genericLangOf(`main${ext}`)?.name, "terraform");
     assert.ok(supportedExtensions().includes(ext));
   }
-  assert.deepEqual(unsupportedExtensions(["tf", ".TFVARS", ".hcl"]), []);
+  assert.equal(genericLangOf("prod.tfvars"), null);
+  assert.deepEqual(unsupportedExtensions(["tf", ".hcl"]), []);
+  assert.deepEqual(unsupportedExtensions([".TFVARS"]), [".TFVARS"]);
 });
 
 test("Terraform blocks become qualified symbols and traversals resolve precisely", async () => {
@@ -59,7 +63,7 @@ test("Terraform blocks become qualified symbols and traversals resolve precisely
   assert.ok(!references.some((edge) => edge.includes("→path.") || edge.includes("→terraform.")));
 });
 
-test("Terraform variable values have distinct names from declarations", async () => {
+test("the Terraform extractor distinguishes variable values when called directly", async () => {
   await warmGenericGrammars(["terraform"]);
   const values = extractGeneric("prod.TFVARS", 'region = "us-east-1"\n', "terraform");
   assert.deepEqual(values.nodes.slice(1).map((node) => node.name), ["input.region"]);
@@ -71,15 +75,21 @@ test("other HCL top-level blocks remain searchable without Terraform-specific gu
   assert.deepEqual(hcl.nodes.slice(1).map((node) => node.name), ["include.root"]);
 });
 
-test("a normal graph build indexes Terraform files and cross-file references", async () => {
+test("a normal graph build indexes Terraform files but excludes tracked .tfvars", async () => {
   const root = mkdtempSync(join(tmpdir(), "graft-terraform-"));
   writeFileSync(join(root, "main.tf"), MAIN);
   writeFileSync(join(root, "variables.tf"), 'variable "region" { type = string }\n');
   writeFileSync(join(root, "prod.tfvars"), 'region = "us-east-1"\n');
+  writeFileSync(join(root, ".gitignore"), "*.tfvars\n");
+  execFileSync("git", ["init", "-q", root]);
+  execFileSync("git", ["-C", root, "add", ".gitignore", "main.tf", "variables.tf"]);
+  execFileSync("git", ["-C", root, "add", "-f", "prod.tfvars"]);
   await buildGraph(root);
   const graph = readGraph(wiringPath(contextDirFor(root)));
   assert.ok(graph?.nodes.some((node) => node.id === "main.tf#aws_s3_bucket.logs"));
-  assert.ok(graph?.nodes.some((node) => node.id === "prod.tfvars#input.region"));
+  assert.ok(!graph?.nodes.some((node) => node.path === "prod.tfvars"));
+  assert.ok(!listContextFiles(root, contextDirFor(root), CODE_EXTENSIONS)
+    .some((file) => file.endsWith("prod.tfvars")));
   assert.ok(graph?.edges.some((edge) => edge.source === "main.tf#output.bucket" &&
     edge.target === "main.tf#aws_s3_bucket.logs" && edge.relation === "references"));
 });
