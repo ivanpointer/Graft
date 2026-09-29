@@ -257,6 +257,12 @@ export function resolveEdges(
         if (hit && hit.id !== e.source && anno?.signature?.includes("@interface"))
           add(e.source, hit.id, "references", hit.confidence);
         else add(e.source, e.name, "references", "inferred");
+      } else if (genericLangOf(e.file)?.name === "terraform") {
+        // Terraform traversals name resources, data sources, variables, locals,
+        // and modules by their qualified address. Resolve only to an unambiguous
+        // in-repo declaration; never invent an edge to an external provider.
+        const hit = resolveName(e.name, e.file, ["variable", "module"], perFileName, globalName);
+        if (hit && hit.id !== e.source) add(e.source, hit.id, "references", hit.confidence);
       } else if (byId.get(e.source)?.origin === "generic") {
         // Breadth tier: a bare-name structural reference (extends / implements /
         // object-creation / module alias) the grammar marked but cannot type. Resolve

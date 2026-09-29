@@ -24,6 +24,7 @@ import { createRequire } from "node:module";
 import { contentHash } from "../util/id.js";
 import type { Kind, NodeV1 } from "./types.js";
 import type { ExtractResult, RawEdge } from "./extract.js";
+import { extractTerraform } from "./terraform.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
@@ -38,7 +39,7 @@ export interface GenericLang {
   wasm: string;
 }
 
-/** The breadth registry. Add a row + a queries/<name>.scm to support a language.
+/** The breadth registry. Add a row plus a tags query or a focused extractor to support a language.
  * Extensions here must NOT collide with the depth tier's EXTENSIONS (extract.ts). */
 export const GENERIC_LANGS: readonly GenericLang[] = [
   { name: "rust", exts: [".rs"], wasm: "rust" },
@@ -58,6 +59,7 @@ export const GENERIC_LANGS: readonly GenericLang[] = [
   { name: "clojure", exts: [".clj", ".cljs", ".cljc", ".bb"], wasm: "clojure" },
   { name: "nix", exts: [".nix"], wasm: "nix" },
   { name: "lua", exts: [".lua"], wasm: "lua" },
+  { name: "terraform", exts: [".tf", ".tfvars", ".hcl"], wasm: "terraform" },
 ];
 
 const byExt = new Map<string, GenericLang>();
@@ -239,6 +241,7 @@ export function extractGeneric(rel: string, source: string, langName: string): E
     throw new Error(`${langName} grammar threw: ${err instanceof Error ? err.message : String(err)}`);
   }
   if (!tree) return { nodes, rawEdges };
+  if (langName === "terraform") return extractTerraform(tree.rootNode as TsNode, rel, source, nodes[0]);
 
   const minted = new Set<string>([rel]);
   const lines = source.split("\n");
