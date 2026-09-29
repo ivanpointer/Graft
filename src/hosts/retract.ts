@@ -195,11 +195,10 @@ function removeJsonKey(path: string, topKey: string, apply: boolean): RetractAct
 }
 
 /**
- * Delete the `[mcp_servers.graft]` table from a TOML config.
+ * Delete the `[mcp_servers.graft]` table and child tables from a TOML config.
  *
  * Line-based on purpose: a real TOML parse-and-reserialize would reformat the
- * user's whole file. The table runs from its header to the next `[`-header or
- * EOF, which is exactly what `upsertCodexToml` appends.
+ * user's whole file. Child tables must go too or an orphan `.env` server remains.
  */
 function removeTomlSection(path: string, apply: boolean): RetractAction {
   if (!existsSync(path)) return 'absent';

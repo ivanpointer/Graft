@@ -13,6 +13,13 @@ import { runCli, tmpRepo } from './helpers.js';
 
 function fresh(): string { return tmpRepo('hostsinit'); }
 
+function runCliInit(repo: string, args: string[], home: string = fresh()): string {
+  return execFileSync(process.execPath, ['--import', 'tsx', 'src/cli.ts', 'init', repo, ...args], {
+    encoding: 'utf8', stdio: 'pipe',
+    env: { ...process.env, HOME: home, XDG_CONFIG_HOME: join(home, '.config'), CODEX_HOME: join(home, '.codex') },
+  });
+}
+
 test('writes only detected hosts by default', () => {
   const home = fresh(); const repo = fresh();
   mkdirSync(join(home, '.cursor'));
@@ -56,19 +63,24 @@ test('preserves user content around the fenced section', () => {
 
 test('CLI: graft init --agents gemini writes GEMINI.md and exits 0', () => {
   const repo = fresh();
-  execFileSync(process.execPath, ['--import', 'tsx', 'src/cli.ts', 'init', repo, '--no-build', '--agents', 'gemini'], {
-    encoding: 'utf8',
-  });
+  runCliInit(repo, ['--no-build', '--agents', 'gemini']);
   assert.ok(readFileSync(join(repo, 'GEMINI.md'), 'utf8').includes('graft ask'));
+});
+
+test('CLI: wiring one repo for Gemini does not retract machine-wide Codex MCP', () => {
+  const repo = fresh(); const home = fresh();
+  mkdirSync(join(home, '.codex'), { recursive: true });
+  const config = join(home, '.codex', 'config.toml');
+  const original = '[mcp_servers.graft]\ncommand = "/custom/graft"\nargs = ["mcp"]\n\n' +
+    '[mcp_servers.graft.env]\nGRAFT_HARNESS_HOST = "codex"\n';
+  writeFileSync(config, original);
+  runCliInit(repo, ['--no-build', '--agents', 'gemini'], home);
+  assert.equal(readFileSync(config, 'utf8'), original);
 });
 
 test('CLI: unknown agent id exits non-zero', () => {
   const repo = fresh();
-  assert.throws(() =>
-    execFileSync(process.execPath, ['--import', 'tsx', 'src/cli.ts', 'init', repo, '--no-build', '--agents', 'nope'], {
-      encoding: 'utf8', stdio: 'pipe',
-    }),
-  );
+  assert.throws(() => runCliInit(repo, ['--no-build', '--agents', 'nope']));
 });
 
 test('explicit empty agents list writes nothing, even when home has agent dirs (no fallback to detection)', () => {
@@ -81,9 +93,7 @@ test('explicit empty agents list writes nothing, even when home has agent dirs (
 
 test('CLI: --agents claude with --no-build writes .claude/ but no other-agent files', () => {
   const repo = fresh();
-  execFileSync(process.execPath, ['--import', 'tsx', 'src/cli.ts', 'init', repo, '--no-build', '--agents', 'claude'], {
-    encoding: 'utf8',
-  });
+  runCliInit(repo, ['--no-build', '--agents', 'claude']);
   assert.ok(existsSync(join(repo, '.claude')));
   assert.ok(!existsSync(join(repo, 'AGENTS.md')));
   assert.ok(!existsSync(join(repo, 'GEMINI.md')));
@@ -92,13 +102,7 @@ test('CLI: --agents claude with --no-build writes .claude/ but no other-agent fi
 
 test('CLI: --agents claude gemini nope exits non-zero and leaves repo untouched (validation before writes)', () => {
   const repo = fresh();
-  assert.throws(() =>
-    execFileSync(
-      process.execPath,
-      ['--import', 'tsx', 'src/cli.ts', 'init', repo, '--no-build', '--agents', 'claude', 'gemini', 'nope'],
-      { encoding: 'utf8', stdio: 'pipe' },
-    ),
-  );
+  assert.throws(() => runCliInit(repo, ['--no-build', '--agents', 'claude', 'gemini', 'nope']));
   assert.ok(!existsSync(join(repo, '.claude')));
   assert.ok(!existsSync(join(repo, 'GEMINI.md')));
   assert.ok(!existsSync(join(repo, 'AGENTS.md')));
@@ -124,7 +128,7 @@ test('mcp: false skips MCP registration', () => {
 
 test('CLI: --no-mcp writes the rule file but no MCP config', () => {
   const repo = fresh();
-  execFileSync(process.execPath, ['--import', 'tsx', 'src/cli.ts', 'init', repo, '--no-build', '--agents', 'cursor', '--no-mcp'], { encoding: 'utf8' });
+  runCliInit(repo, ['--no-build', '--agents', 'cursor', '--no-mcp']);
   assert.ok(existsSync(join(repo, '.cursor', 'rules', 'graft.mdc')));
   assert.ok(!existsSync(join(repo, '.cursor', 'mcp.json')));
 });

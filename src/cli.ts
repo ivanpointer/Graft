@@ -1256,10 +1256,12 @@ function wireTarget(
     // never touches the rest, so a repo wired by an older version (or by the same
     // version with different --agents) keeps that run's files forever — and
     // `reconcileWiring` then keeps them *up to date*, which is worse than stale.
-    // Retract every host NOT being written now; `exclude` spares the ones about to
-    // be rewritten, and the graph cache is kept (init is one step from using it).
+    // Retract repo-local hosts NOT being written now; `exclude` spares the ones
+    // about to be rewritten, and the graph cache is kept. Machine-wide host
+    // configs are shared by other repos, so one repo's selection cannot remove
+    // Codex's MCP transport (or any other global host wiring).
     const retracted = changed(
-      runRetract(repo, { home, apply: true, global: opts.global, cache: false, exclude: ids }),
+      runRetract(repo, { home, apply: true, global: false, cache: false, exclude: ids }),
     ).filter((r) => r.action !== "skipped-unparseable");
     for (const r of retracted) say(`- removed ${r.path} (${r.what}) — agent not selected`);
     report.retracted = [...new Set(retracted.map((r) => r.hostId))];
