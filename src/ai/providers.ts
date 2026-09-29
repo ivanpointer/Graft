@@ -31,6 +31,8 @@ export interface EngineConfig {
   apiKey?: string;
   /** Model id. Env: GRAFT_MODEL. Provider-specific default. */
   model?: string;
+  /** Reasoning level for OpenAI-compatible transports. Env: GRAFT_REASONING_EFFORT. */
+  reasoningEffort?: string;
   /** Base URL for OpenAI-compatible endpoints. Env: GRAFT_BASE_URL. */
   baseUrl?: string;
 
@@ -61,6 +63,7 @@ export interface ResolvedConfig {
   provider: ProviderKind;
   apiKey?: string;
   model: string;
+  reasoningEffort?: string;
   baseUrl?: string;
   headers?: Record<string, string>;
   /** True when the key came from the deprecated OPENROUTER_* fallback. */
@@ -110,6 +113,7 @@ export function resolveConfig(config: EngineConfig = {}): ResolvedConfig {
     env.GRAFT_OPENROUTER_MODEL ??
     env.ORCAROUTER_MODEL ??
     DEFAULT_MODELS[provider];
+  const reasoningEffort = config.reasoningEffort ?? env.GRAFT_REASONING_EFFORT;
 
   let baseUrl = config.baseUrl ?? env.GRAFT_BASE_URL ?? env.OPENROUTER_BASE_URL ?? env.ORCAROUTER_BASE_URL;
   // Back-compat: an existing setup with only OPENROUTER_API_KEY keeps hitting
@@ -128,6 +132,7 @@ export function resolveConfig(config: EngineConfig = {}): ResolvedConfig {
     provider,
     apiKey,
     model,
+    reasoningEffort,
     baseUrl,
     headers,
     usedLegacyEnv,

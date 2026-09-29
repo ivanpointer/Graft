@@ -154,6 +154,7 @@ export class Graft {
       provider: this.cfg.provider,
       apiKey: this.cfg.apiKey,
       model: this.cfg.model,
+      reasoningEffort: this.cfg.reasoningEffort,
       baseUrl: this.cfg.baseUrl,
       headers: this.cfg.headers,
     });

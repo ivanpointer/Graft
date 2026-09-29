@@ -213,7 +213,7 @@ export async function ensureFreshGraph(root: string, opts: RefreshOptions = {}):
       // here so an auto-rebuild keeps the same limited file set instead of silently
       // widening to the whole tree.
       const onlyDirs = readFingerprint(outDir)?.onlyDirs;
-      await buildGraph(dir, { contextDir: opts.contextDir, graphOnly: true, onlyDirs });
+      await buildGraph(dir, { contextDir: opts.contextDir, graphOnly: true, onlyDirs, statsTrigger: 'auto-refresh' });
       invalidateGraphCaches(outDir);
       return { refreshed: true, drift: drift ?? undefined, note: seedNote };
     } finally {

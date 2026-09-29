@@ -13,6 +13,67 @@ import { flushClosedSessions, summarizeSession } from '../telemetry/sessions.js'
 import { hasSavingsTally, lastAssistantTurn, lastTurnBilling } from './tally.js';
 import { scopeOf, scopesOfGraph } from '../graph/scopes.js';
 import { classifyToolUse, isMcpToolName, isGraftMcpTool, parseSavings, recordToolUse, type ToolKind } from './session-metrics.js';
+import { recordHookRun } from '../stats/store.js';
+import { recordHarnessConfiguration } from '../stats/config.js';
+
+const INVOCATION_ID_LINE = /^\[graft\] invocation_id=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\r?$/gim;
+
+/** Inspect only a tool's returned value, never its command or surrounding hook input. */
+export function invocationIdFromResponse(response: unknown): string | undefined {
+  const ids = new Set<string>();
+  const seen = new Set<object>();
+  function visit(value: unknown, depth: number): void {
+    if (depth > 16 || ids.size > 1) return;
+    if (typeof value === 'string') {
+      for (const match of value.matchAll(INVOCATION_ID_LINE)) ids.add(match[1].toLowerCase());
+      // Code-mode and Cursor can stringify a nested MCP result before putting it
+      // in the hook response. Parse that envelope so line boundaries in its text
+      // blocks are checked after JSON unescaping.
+      if (ids.size <= 1 && /^[\s]*[\[{]/.test(value) && value.length <= 2_000_000) {
+        try { visit(JSON.parse(value), depth + 1); } catch { /* ordinary tool text */ }
+      }
+      return;
+    }
+    if (!value || typeof value !== 'object' || seen.has(value)) return;
+    seen.add(value);
+    if (Array.isArray(value)) { for (const item of value) visit(item, depth + 1); return; }
+    for (const item of Object.values(value)) visit(item, depth + 1);
+  }
+  visit(response, 0);
+  return ids.size === 1 ? [...ids][0] : undefined;
+}
+
+type ObservedToolMetadata = {
+  invocationId?: string;
+  turnId?: string;
+  toolUseId?: string;
+  model?: string;
+  reasoningEffort?: string;
+  metadataSource?: 'host-payload';
+};
+
+function hostText(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() && value.length <= 512 ? value.trim() : undefined;
+}
+
+export function toolMetadata(input: any, host: 'codex' | 'claude-code' | 'cursor', _dir: string, response: unknown): ObservedToolMetadata {
+  const invocationId = invocationIdFromResponse(response);
+  if (!invocationId) return {};
+  const model = host === 'claude-code' ? undefined
+    : hostText(host === 'cursor' ? input?.model_id : input?.model);
+  const params = Array.isArray(input?.model_params) ? input.model_params : [];
+  const cursorEffort = params.find((item: any) => item?.id === 'effort')?.value;
+  const reasoningEffort = host === 'claude-code' ? hostText(input?.effort?.level)
+    : host === 'cursor' ? hostText(cursorEffort) : undefined;
+  return {
+    invocationId,
+    turnId: hostText(host === 'cursor' ? input?.generation_id : host === 'codex' ? input?.turn_id : input?.prompt_id),
+    toolUseId: hostText(input?.tool_use_id),
+    model,
+    reasoningEffort,
+    metadataSource: model || reasoningEffort ? 'host-payload' : undefined,
+  };
+}
 
 /** Prompts shorter than this never trigger retrieval — they are almost always
  * conversational ("yes go ahead", "thanks") and the coverage gate can't judge
@@ -250,9 +311,12 @@ export function lastFileScopeHint(dir: string, lastFile: string | null | undefin
  * Write/Edit/unrelated-Bash majority: nothing to classify and no footer means
  * nothing is written.
  */
-function handleToolUse(input: any, dir: string): void {
-  recordToolUse(dir, input?.session_id || 'default',
-    { ...classifyAndScore(input?.tool_name, input?.tool_input?.command, () => input?.tool_response ?? input), host: 'claude-code' });
+async function handleToolUse(input: any, dir: string, host: 'codex' | 'claude-code', configSnapshotId?: string): Promise<void> {
+  const response = input?.tool_response;
+  const scored = classifyAndScore(input?.tool_name, input?.tool_input?.command, () => response ?? input);
+  const metadata = classifyToolUse(input?.tool_name, input?.tool_input?.command) === 'graft'
+    ? toolMetadata(input, host, dir, response) : {};
+  await recordToolUse(dir, input?.session_id || 'default', { ...scored, ...metadata, host }, configSnapshotId);
 }
 
 /**
@@ -288,12 +352,15 @@ function classifyAndScore(
  * (`graft_find_code`) tool-name shapes, so the guard — not just the installed
  * matcher — is what prevents the double count.
  */
-function handleCursorPostTool(input: any, dir: string): void {
+async function handleCursorPostTool(input: any, dir: string, configSnapshotId?: string): Promise<void> {
   const toolName = String(input?.tool_name ?? '');
   if (isMcpToolName(toolName) || isGraftMcpTool(toolName)) return; // handled by handleCursorMcp
   const command = input?.tool_input?.command ?? input?.tool_input?.cmd;
-  recordToolUse(dir, cursorSessionId(input),
-    { ...classifyAndScore(toolName, command, () => input?.tool_output ?? input?.tool_response ?? input), host: 'cursor' });
+  const response = input?.tool_output ?? input?.tool_response;
+  const scored = classifyAndScore(toolName, command, () => response ?? input);
+  const metadata = classifyToolUse(toolName, command) === 'graft'
+    ? toolMetadata(input, 'cursor', dir, response) : {};
+  await recordToolUse(dir, cursorSessionId(input), { ...scored, ...metadata, host: 'cursor' }, configSnapshotId);
 }
 
 /**
@@ -301,11 +368,14 @@ function handleCursorPostTool(input: any, dir: string): void {
  * recognised by its name and its savings read out of `result_json`. This is the
  * one place graft MCP calls are counted for Cursor.
  */
-function handleCursorMcp(input: any, dir: string): void {
+async function handleCursorMcp(input: any, dir: string, configSnapshotId?: string): Promise<void> {
   const toolName = String(input?.tool_name ?? '');
   if (!isGraftMcpTool(toolName)) return;
-  const savedTokens = parseSavings(JSON.stringify(input?.result_json ?? input?.result ?? input ?? ''));
-  recordToolUse(dir, cursorSessionId(input), { kind: 'graft', savedTokens, host: 'cursor' });
+  const response = input?.result_json ?? input?.result;
+  const savedTokens = parseSavings(JSON.stringify(response ?? ''));
+  await recordToolUse(dir, cursorSessionId(input), {
+    kind: 'graft', savedTokens, ...toolMetadata(input, 'cursor', dir, response), host: 'cursor',
+  }, configSnapshotId);
 }
 
 /** Cursor keys a chat by `conversation_id` (its `session_id` equivalent). */
@@ -394,7 +464,26 @@ function handleStop(input: any, dir: string): void {
 export async function main(event: string): Promise<void> {
   const input = readStdin();
   const dir = projectDir(input);
+  const startedAt = Date.now();
+  let outcome: 'ok' | 'error' = 'ok';
+  const isCursor = event.startsWith('cursor-');
+  const host = isCursor ? 'cursor' : process.env.CODEX_SESSION_ID || input?.turn_id ? 'codex' : 'claude-code';
+  const sessionId = isCursor ? cursorSessionId(input) : input?.session_id || process.env.CODEX_SESSION_ID || 'default';
+  // Session model changes are useful history, but a one-turn fallback can serve
+  // a tool call without changing the session model. Do not attach that hint to
+  // an exact invocation as if it were the model that made the call.
+  const configurationInput = host === 'claude-code' && event === 'tool-savings'
+    ? { effort: input?.effort }
+    : host === 'claude-code' && event === 'post-model-switch'
+      ? { model: input?.to_model }
+      : input;
+  const configSnapshotId = await recordHarnessConfiguration(host, configurationInput);
+  const configuredEvent: Record<string, string> = {
+    'session-start': 'SessionStart', prompt: 'UserPromptSubmit', 'post-edit': 'PostToolUse',
+    'tool-savings': 'PostToolUse', stop: 'Stop', 'post-edit-sync': 'PostToolUse',
+  };
 
+  try {
   if (event === 'session-start') {
     // Before anything is emitted: refresh this repo's wiring if it was written by
     // an older graft, and pick up any cached "newer version on npm" answer.
@@ -418,11 +507,13 @@ export async function main(event: string): Promise<void> {
 
   if (event === 'post-edit') { await handlePostEdit(input, dir); return; }
 
-  if (event === 'tool-savings') { handleToolUse(input, dir); return; }
+  if (event === 'tool-savings') { await handleToolUse(input, dir, host === 'codex' ? 'codex' : 'claude-code', configSnapshotId ?? undefined); return; }
 
-  if (event === 'cursor-post-tool') { handleCursorPostTool(input, dir); return; }
+  if (event === 'post-model-switch') return;
 
-  if (event === 'cursor-mcp') { handleCursorMcp(input, dir); return; }
+  if (event === 'cursor-post-tool') { await handleCursorPostTool(input, dir, configSnapshotId ?? undefined); return; }
+
+  if (event === 'cursor-mcp') { await handleCursorMcp(input, dir, configSnapshotId ?? undefined); return; }
 
   // Cursor closes a chat: force-close THIS conversation into a bucketed
   // `session_summary` now (its file's mtime is fresh, so the idle sweep would
@@ -458,5 +549,16 @@ export async function main(event: string): Promise<void> {
     const txt = relevantRetrieval(ask, s);
     if (txt) emit('UserPromptSubmit', txt);
     writeSession(dir, id, s);
+  }
+  } catch (error) {
+    outcome = 'error';
+    throw error;
+  } finally {
+    await recordHookRun({
+      repo: dir, sessionId, host, event, outcome, durationMs: Date.now() - startedAt,
+      timeoutMs: configuredEvent[event] ? installedHookTimeout(dir, configuredEvent[event]) ?? undefined : undefined,
+      errorCode: outcome === 'error' ? 'hook-error' : undefined,
+      configSnapshotId: configSnapshotId ?? undefined,
+    });
   }
 }

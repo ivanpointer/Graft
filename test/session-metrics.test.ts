@@ -14,6 +14,8 @@ import {
   formatSessionStats,
 } from '../src/claude/session-metrics.js';
 import { readSession } from '../src/claude/state.js';
+import { STATS_SCHEMA_VERSION, readStatsReport, recordInvocation } from '../src/stats/store.js';
+import { recordHarnessConfiguration } from '../src/stats/config.js';
 
 function fresh(): string { return mkdtempSync(join(tmpdir(), 'graft-metrics-')); }
 
@@ -105,21 +107,21 @@ test('parseSavings sums every footer, tolerant of commas', () => {
 
 // ── recordToolUse ──────────────────────────────────────────────────────────
 
-test('recordToolUse increments the right counter and accumulates savings', () => {
+test('recordToolUse increments the right counter and accumulates savings', async () => {
   const d = fresh();
-  recordToolUse(d, 's1', { kind: 'graft', savedTokens: 500 });
-  recordToolUse(d, 's1', { kind: 'graft' });
-  recordToolUse(d, 's1', { kind: 'source' });
+  await recordToolUse(d, 's1', { kind: 'graft', savedTokens: 500 });
+  await recordToolUse(d, 's1', { kind: 'graft' });
+  await recordToolUse(d, 's1', { kind: 'source' });
   const s = readSession(d, 's1');
   assert.equal(s.graftReads, 2);
   assert.equal(s.sourceReads, 1);
   assert.equal(s.savedTokens, 500);
 });
 
-test('recordToolUse is a no-op when there is nothing to record (no file written)', () => {
+test('recordToolUse is a no-op when there is nothing to record (no file written)', async () => {
   const d = fresh();
-  recordToolUse(d, 's1', { kind: null, savedTokens: 0 });
-  recordToolUse(d, 's1', {});
+  await recordToolUse(d, 's1', { kind: null, savedTokens: 0 });
+  await recordToolUse(d, 's1', {});
   // readSession returns the empty default without a file; the proof it never
   // wrote is that a fresh empty session equals what we read.
   const s = readSession(d, 's1');
@@ -128,21 +130,67 @@ test('recordToolUse is a no-op when there is nothing to record (no file written)
   assert.equal(s.savedTokens, 0);
 });
 
-test('recordToolUse can log savings on a graft read with no explicit kind classification', () => {
+test('recordToolUse can log savings on a graft read with no explicit kind classification', async () => {
   const d = fresh();
-  recordToolUse(d, 's1', { kind: 'graft', savedTokens: 1990 });
+  await recordToolUse(d, 's1', { kind: 'graft', savedTokens: 1990 });
   assert.equal(readSession(d, 's1').savedTokens, 1990);
   assert.equal(readSession(d, 's1').graftReads, 1);
 });
 
-test('recordToolUse stamps the host once — the first tool use owns the attribution', () => {
+test('recordToolUse stamps the host once — the first tool use owns the attribution', async () => {
   const d = fresh();
-  recordToolUse(d, 's1', { kind: 'graft', host: 'cursor' });
+  await recordToolUse(d, 's1', { kind: 'graft', host: 'cursor' });
   assert.equal(readSession(d, 's1').host, 'cursor');
   // a later use from a different host must not overwrite the stamp
-  recordToolUse(d, 's1', { kind: 'source', host: 'claude-code' });
+  await recordToolUse(d, 's1', { kind: 'source', host: 'claude-code' });
   assert.equal(readSession(d, 's1').host, 'cursor', 'host is not re-stamped');
 });
+
+test('recordToolUse counts repeated hook delivery for one invocation once', async () => {
+  const d = fresh();
+  const use = {
+    kind: 'graft' as const, host: 'codex' as const, savedTokens: 315,
+    invocationId: '9435a935-837e-41da-a88a-d20971ed8b24',
+    toolUseId: 'tool-1', metadataSource: 'host-payload' as const,
+  };
+  await recordToolUse(d, 's1', use);
+  await recordToolUse(d, 's1', use);
+  assert.equal(readSession(d, 's1').graftReads, 1);
+  assert.equal(readSession(d, 's1').savedTokens, 315);
+});
+
+test('recordToolUse joins a live host snapshot to its exact invocation once',
+  { skip: STATS_SCHEMA_VERSION < 7 ? 'companion store migration is not in this worktree' : false }, async () => {
+    const d = fresh();
+    const previousHome = process.env.GRAFT_STATS_HOME;
+    process.env.GRAFT_STATS_HOME = d;
+    try {
+      const invocationId = await recordInvocation({
+        command: 'ask', surface: 'cli', repo: d, savedTokens: 700,
+      }, d) as unknown as string;
+      const snapshotId = await recordHarnessConfiguration('codex', { model: 'live-model' }, d);
+      assert.ok(invocationId && snapshotId);
+      const use = {
+        kind: 'graft' as const, host: 'codex' as const, savedTokens: 700,
+        invocationId, turnId: 'turn-1', toolUseId: 'tool-1',
+        metadataSource: 'host-payload' as const,
+      };
+      await recordToolUse(d, 'session-1', use, snapshotId);
+      await recordToolUse(d, 'session-1', use, snapshotId);
+
+      const session = readSession(d, 'session-1');
+      assert.equal(session.graftReads, 1, 'duplicate hook delivery does not inflate adoption');
+      assert.equal(session.savedTokens, 700, 'duplicate hook delivery does not inflate session savings');
+      const report = await readStatsReport({ home: d });
+      assert.deepEqual(report.modelEfforts, [
+        { provider: 'unknown', model: 'live-model', reasoningEffort: 'unknown', calls: 1, savedTokens: 700 },
+      ]);
+      assert.equal(report.savedTokens, 700, 'invocations remain the only authoritative savings total');
+    } finally {
+      if (previousHome === undefined) delete process.env.GRAFT_STATS_HOME;
+      else process.env.GRAFT_STATS_HOME = previousHome;
+    }
+  });
 
 // ── latestSession + formatSessionStats (what `graft stats` reads) ──────────
 

@@ -54,6 +54,7 @@ function graftBlocks(helpers?: string): Record<string, Json[]> {
     // re-runs `graft init`, since that is the only caller of this function.
     UserPromptSubmit: [{ hooks: [{ type: 'command', command: hookCmd('prompt', helpers), timeout: 15000 }] }],
     SessionStart: [{ hooks: [{ type: 'command', command: hookCmd('session-start', helpers), timeout: 8000 }] }],
+    PostModelSwitch: [{ hooks: [{ type: 'command', command: hookCmd('post-model-switch', helpers), timeout: 8000 }] }],
     Stop: [{ hooks: [{ type: 'command', command: hookCmd('stop', helpers), timeout: 8000 }] }],
   };
 }

@@ -3,12 +3,13 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { underGraft, main, lastFileScopeHint, promptAskTimeout } from '../src/claude/hooks.js';
+import { underGraft, main, lastFileScopeHint, promptAskTimeout, invocationIdFromResponse, toolMetadata } from '../src/claude/hooks.js';
 import { readStats, readSession } from '../src/claude/state.js';
 import { runSync } from '../src/claude/sync-run.js';
 import { savingsLine } from '../src/context/savings.js';
 import { CI_ENV_VARS } from '../src/telemetry/gate.js';
 import { writeStats, emptyStats, acquireLock, resolveContextDir } from '../src/claude/state.js';
+import { readStatsReport, recordInvocation } from '../src/stats/store.js';
 
 test('underGraft detects edits inside graft/', () => {
   assert.equal(underGraft('/repo', '/repo/graft/x.md'), true);
@@ -490,6 +491,94 @@ test('tool-savings now scores the mix: a Read is a source read, a graft footer i
 
 // ── Cursor hook adapters ────────────────────────────────────────────────────
 
+const INVOCATION = '550e8400-e29b-41d4-a716-446655440000';
+
+test('invocation marker is parsed from CLI stderr and nested MCP result content', () => {
+  const marker = `[graft] invocation_id=${INVOCATION}`;
+  assert.equal(invocationIdFromResponse({ stdout: 'answer', stderr: marker }), INVOCATION);
+  assert.equal(invocationIdFromResponse({ content: [{ type: 'text', text: marker }] }), INVOCATION);
+  assert.equal(invocationIdFromResponse(JSON.stringify({ result: { text: marker } })), INVOCATION);
+  assert.equal(invocationIdFromResponse({ output: { content: [{ type: 'text', text: JSON.stringify({
+    result: { content: [{ type: 'text', text: `${marker}\nanswer` }] },
+  }) }] } }), INVOCATION, 'code-mode result nested inside a JSON text block');
+  assert.equal(invocationIdFromResponse({ text: `${marker}\n${marker}` }), INVOCATION);
+  assert.equal(invocationIdFromResponse({ text: `${marker}\n[graft] invocation_id=00000000-0000-4000-8000-000000000001` }), undefined);
+  assert.equal(invocationIdFromResponse({ text: '[graft] invocation_id=not-a-uuid' }), undefined);
+  assert.equal(invocationIdFromResponse({ text: `quoted ${marker}` }), undefined, 'marker must occupy its own line');
+  assert.equal(invocationIdFromResponse({ text: 'no invocation marker' }), undefined);
+});
+
+test('host tool metadata is tied to a response marker and native per-call fields', async () => {
+  const d = mkdtempSync(join(tmpdir(), 'graft-attribution-'));
+  process.env.CLAUDE_PROJECT_DIR = d;
+  const codexSession = process.env.CODEX_SESSION_ID;
+  delete process.env.CODEX_SESSION_ID;
+  try {
+    await runWithStdin(JSON.stringify({ session_id: 'claude-s', model: 'claude-first' }), () => main('session-start'));
+    await runWithStdin(JSON.stringify({ session_id: 'claude-s', to_model: 'claude-second' }), () => main('post-model-switch'));
+    const marker = `[graft] invocation_id=${INVOCATION}`;
+    assert.deepEqual(toolMetadata({ session_id: 'claude-s', prompt_id: 'prompt-1', tool_use_id: 'tool-1', effort: { level: 'high' } },
+      'claude-code', d, { content: [{ text: marker }] }), {
+      invocationId: INVOCATION, turnId: 'prompt-1', toolUseId: 'tool-1',
+      model: undefined, reasoningEffort: 'high', metadataSource: 'host-payload',
+    });
+    assert.deepEqual(toolMetadata({ model: 'gpt-live', turn_id: 'turn-1', tool_use_id: 'tool-2', model_reasoning_effort: 'max' },
+      'codex', d, { stderr: marker }), {
+      invocationId: INVOCATION, turnId: 'turn-1', toolUseId: 'tool-2',
+      model: 'gpt-live', reasoningEffort: undefined, metadataSource: 'host-payload',
+    });
+    assert.deepEqual(toolMetadata({ conversation_id: 'cursor-s', generation_id: 'generation-1', model_id: 'cursor-live',
+      model_params: [{ id: 'effort', value: 'max' }] }, 'cursor', d, JSON.stringify({ text: marker })), {
+      invocationId: INVOCATION, turnId: 'generation-1', toolUseId: undefined,
+      model: 'cursor-live', reasoningEffort: 'max', metadataSource: 'host-payload',
+    });
+    assert.equal(toolMetadata({ conversation_id: 'cursor-s', model: 'configured-only' },
+      'cursor', d, { text: marker }).model, undefined,
+    'the configured model slug does not prove which model made this tool call');
+    assert.deepEqual(toolMetadata({ model: 'gpt-live', turn_id: 'turn-1' }, 'codex', d, { stdout: 'no marker' }), {});
+  } finally {
+    delete process.env.CLAUDE_PROJECT_DIR;
+    if (codexSession === undefined) delete process.env.CODEX_SESSION_ID;
+    else process.env.CODEX_SESSION_ID = codexSession;
+  }
+});
+
+test('Codex hook attributes one recorded invocation and ignores a replay', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'graft-codex-attribution-'));
+  const statsHome = mkdtempSync(join(tmpdir(), 'graft-codex-attribution-stats-'));
+  const previous = {
+    project: process.env.CLAUDE_PROJECT_DIR,
+    stats: process.env.GRAFT_STATS_HOME,
+    codex: process.env.CODEX_SESSION_ID,
+  };
+  process.env.CLAUDE_PROJECT_DIR = dir;
+  process.env.GRAFT_STATS_HOME = statsHome;
+  delete process.env.CODEX_SESSION_ID;
+  try {
+    const id = await recordInvocation({ command: 'graft_repo_map', surface: 'mcp', savedTokens: 500 }, statsHome);
+    assert.ok(id);
+    const input = JSON.stringify({
+      session_id: 'codex-s', turn_id: 'turn-1', tool_use_id: 'call-1', model: 'gpt-live',
+      tool_name: 'mcp__graft__graft_repo_map',
+      tool_response: { content: [{ type: 'text', text: `[graft] invocation_id=${id}\n[graft] tokens saved ≈ 500` }] },
+    });
+    await runWithStdin(input, () => main('tool-savings'));
+    await runWithStdin(input, () => main('tool-savings'));
+    assert.equal(readSession(dir, 'codex-s').graftReads, 1);
+    assert.equal(readSession(dir, 'codex-s').savedTokens, 500);
+    assert.deepEqual((await readStatsReport({ home: statsHome })).modelEfforts, [
+      { provider: 'unknown', model: 'gpt-live', reasoningEffort: 'unknown', calls: 1, savedTokens: 500 },
+    ]);
+  } finally {
+    if (previous.project === undefined) delete process.env.CLAUDE_PROJECT_DIR;
+    else process.env.CLAUDE_PROJECT_DIR = previous.project;
+    if (previous.stats === undefined) delete process.env.GRAFT_STATS_HOME;
+    else process.env.GRAFT_STATS_HOME = previous.stats;
+    if (previous.codex === undefined) delete process.env.CODEX_SESSION_ID;
+    else process.env.CODEX_SESSION_ID = previous.codex;
+  }
+});
+
 test('cursor-post-tool: Read → source read, Shell graft → graft read + savings, keyed by conversation_id', async () => {
   const d = mkdtempSync(join(tmpdir(), 'graft-cursor-pt-'));
   process.env.CLAUDE_PROJECT_DIR = d;
@@ -519,6 +608,24 @@ test('cursor-post-tool skips graft MCP tools — prefixed AND bare — so afterM
     // bare shape — the guard, not just the installed matcher, must catch this or it double-counts
     await runWithStdin(JSON.stringify({ conversation_id: 'c2', tool_name: 'graft_find_code', tool_output: '{}' }), () => main('cursor-post-tool'));
     assert.equal(existsSync(join(d, 'graft', '.cache', 'session', 'c2.json')), false, 'bare graft MCP tool not counted here');
+  } finally {
+    delete process.env.CLAUDE_PROJECT_DIR;
+  }
+});
+
+test('Cursor MCP marker is counted once when both native post-tool surfaces fire', async () => {
+  const d = mkdtempSync(join(tmpdir(), 'graft-cursor-correlated-'));
+  process.env.CLAUDE_PROJECT_DIR = d;
+  try {
+    const input = {
+      conversation_id: 'c1', generation_id: 'generation-1', model_id: 'selected-model',
+      tool_name: 'MCP:graft_find_code',
+      result_json: JSON.stringify({ content: [{ text: `[graft] invocation_id=${INVOCATION}\n[graft] tokens saved ≈ 700` }] }),
+    };
+    await runWithStdin(JSON.stringify({ ...input, tool_output: input.result_json }), () => main('cursor-post-tool'));
+    await runWithStdin(JSON.stringify(input), () => main('cursor-mcp'));
+    assert.equal(readSession(d, 'c1').graftReads, 1);
+    assert.equal(readSession(d, 'c1').savedTokens, 700);
   } finally {
     delete process.env.CLAUDE_PROJECT_DIR;
   }

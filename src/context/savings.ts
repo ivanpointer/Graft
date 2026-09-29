@@ -14,6 +14,7 @@
  */
 import type { GraphV1 } from '../graph/types.js';
 import { formatDollars } from './price.js';
+import { noteSavings } from '../stats/current.js';
 
 export interface Savings {
   /** How many source files the baseline covers. */
@@ -117,6 +118,7 @@ export function savingsLine(body: string, saved: Savings | undefined): string {
   if (base <= pack) return '';
   const delta = base - pack;
   const pct = Math.round((delta / base) * 100);
+  noteSavings({ savedTokens: delta, baselineTokens: base, outputTokens: pack, sourceFiles: saved.files });
   return (
     `[graft] tokens saved ≈ ${delta.toLocaleString()} (${pct}%) — this output ≈ ` +
     `${pack.toLocaleString()} tok vs reading the ${saved.files} file(s) it covers whole ≈ ` +
@@ -138,6 +140,24 @@ export function sumSavingsFooters(text: string): number {
     total += Number(m[1].replace(/,/g, '')) || 0;
   }
   return total;
+}
+
+/** Machine-readable correlation for one recorded command or MCP tool call.
+ * Kept separate from savings lines: a workspace response can contain several
+ * savings estimates, while the invocation row covers the whole call. */
+export function invocationIdLine(id: string): string {
+  return `[graft] invocation_id=${id}`;
+}
+
+/** Keep an existing savings headline first so short output previews retain it. */
+export function withInvocationId(text: string, id: string | null): string {
+  if (!id) return text;
+  const line = invocationIdLine(id);
+  if (text.startsWith('[graft] tokens saved ≈ ')) {
+    const end = text.indexOf('\n');
+    if (end >= 0) return `${text.slice(0, end)}\n${line}${text.slice(end)}`;
+  }
+  return `${line}\n${text}`;
 }
 
 /** Render `body` with the savings line on TOP.

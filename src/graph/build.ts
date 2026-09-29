@@ -14,6 +14,7 @@
  * one — the invariant `test/graph-incremental.test.ts` pins down.
  */
 import { readFileSync } from "node:fs";
+import { performance } from "node:perf_hooks";
 import { basename, dirname, resolve } from "node:path";
 import { walkDir } from "../ingest/fs.js";
 import { contextDirFor, ensureGitignored, ensureSearchable } from "../context/node-file.js";
@@ -48,6 +49,7 @@ import {
   writeMeaningSourceCache,
   type MeaningSourceEntry,
 } from "./meaning-source-cache.js";
+import { recordGraphBuild, type GraphBuildFact, type GraphBuildPhase } from "../stats/store.js";
 
 export { listSourceFiles } from "./source-files.js";
 
@@ -87,6 +89,8 @@ export interface GraphBuildOptions {
    * the pre-query refresh (`graph/refresh.ts`); an explicit `graft build` never
    * sets it. See the write block in {@link buildGraph} for why the split exists. */
   graphOnly?: boolean;
+  /** Attribution only: auto-refresh sets this when it actually calls the builder. */
+  statsTrigger?: 'auto-refresh';
   /** Opt-in compiler-grade edge enrichment via a language server (`graft build
    * --lsp`): adds `lsp_resolved` call edges the AST resolver couldn't (member
    * calls, breadth-tier calls). Off by default — needs a server on PATH and is
@@ -163,6 +167,56 @@ export async function buildGraph(
   dir: string,
   opts: GraphBuildOptions = {},
 ): Promise<GraphBuildResult> {
+  const started = performance.now();
+  let phaseStarted = started;
+  let phase: GraphBuildPhase = 'enumerate';
+  const phases: GraphBuildFact['phases'] = {};
+  // One active phase at a time: each mark closes the previous wall-clock span,
+  // so nested work is counted once and a failed attempt retains its last span.
+  const measure: BuildMeasurement = {
+    mode: 'cold',
+    mark(next?: GraphBuildPhase) {
+      const now = performance.now();
+      phases[phase] = (phases[phase] ?? 0) + now - phaseStarted;
+      phaseStarted = now;
+      if (next) phase = next;
+    },
+  };
+  let outcome: GraphBuildFact['outcome'] = 'failed';
+  try {
+    const result = await buildGraphWork(dir, opts, measure);
+    outcome = result.errors.length ? 'partial' : 'ok';
+    return result;
+  } finally {
+    measure.mark();
+    await recordGraphBuild({
+      repo: resolve(dir), trigger: opts.statsTrigger ?? 'direct',
+      mode: measure.mode, graphOnly: opts.graphOnly === true, outcome,
+      sourceFileCount: measure.sourceFileCount, sourceBytes: measure.sourceBytes,
+      parsedCount: measure.parsedCount, reusedCount: measure.reusedCount,
+      nodeCount: measure.nodeCount, edgeCount: measure.edgeCount,
+      errorCount: measure.errorCount === undefined ? (outcome === 'failed' ? 1 : undefined)
+        : measure.errorCount + Number(outcome === 'failed'),
+      durationMs: performance.now() - started, phases,
+    });
+  }
+}
+
+interface BuildMeasurement {
+  mode: GraphBuildFact['mode'];
+  sourceFileCount?: number;
+  sourceBytes?: number;
+  parsedCount?: number;
+  reusedCount?: number;
+  nodeCount?: number;
+  edgeCount?: number;
+  errorCount?: number;
+  mark(next?: GraphBuildPhase): void;
+}
+
+async function buildGraphWork(
+  dir: string, opts: GraphBuildOptions, measure: BuildMeasurement,
+): Promise<GraphBuildResult> {
   const root = resolve(dir);
   const outDir = contextDirFor(root, opts.contextDir);
   // Enumerate once: source extraction, scope discovery, and Go module
@@ -175,7 +229,10 @@ export async function buildGraph(
   const onlyDirs = opts.onlyDirs && opts.onlyDirs.length > 0 ? new Set(opts.onlyDirs) : undefined;
   const repoFiles = filterByOnlyDirs(walked, root, onlyDirs);
   const files = listSourceStats(root, outDir, repoFiles);
+  measure.sourceFileCount = files.length;
+  measure.sourceBytes = files.reduce((sum, file) => sum + file.size, 0);
   const discoveredScopes = discoverScopes(root, repoFiles);
+  measure.mark('prepare');
 
   const nodes: NodeV1[] = [];
   const rawEdges: RawEdge[] = [];
@@ -197,6 +254,8 @@ export async function buildGraph(
   // from scratch each run and keyed only by files currently on disk, so deletions
   // fall out of both the cache and the fingerprint with no separate pruning pass.
   const priorExtract = opts.reuse === false ? emptyExtractCache() : readExtractCache(outDir);
+  const hadPrior = Object.keys(priorExtract.files).length > 0;
+  if (hadPrior) measure.mode = 'incremental';
   const entries: Record<string, ExtractEntry> = {};
   let parsed = 0;
   let reused = 0;
@@ -212,8 +271,13 @@ export async function buildGraph(
   await warmContainerGrammars(
     new Set(files.map((f) => containerLangOf(f.abs)?.name).filter((n): n is string => !!n)),
   );
+  measure.mark('extract');
 
   files.forEach((f, i) => {
+    // Preserve progress if a callback or extractor aborts this attempt.
+    measure.parsedCount = parsed;
+    measure.reusedCount = reused;
+    measure.errorCount = errors.length;
     const rel = f.rel;
     opts.onProgress?.({ phase: "parse", index: i, total: files.length, file: rel });
     // Depth tier (hand-written, native grammar) if a language claims the file;
@@ -287,6 +351,11 @@ export async function buildGraph(
       entries[rel] = { size: f.size, mtimeMs: f.mtimeMs, hash, nodes: [], rawEdges: [], error: message };
     }
   });
+  measure.parsedCount = parsed;
+  measure.reusedCount = reused;
+  measure.errorCount = errors.length;
+  measure.mode = opts.reuse === false || !hadPrior ? 'cold' : parsed === 0 ? 'reuse' : 'incremental';
+  measure.mark('resolve');
 
   // Persist the memo BEFORE enrichment, because `enrichGraph` mutates these very
   // node objects (summary/crux/summary_state) and the cache must only ever hold
@@ -320,6 +389,9 @@ export async function buildGraph(
     nodes,
     edges,
   };
+  measure.nodeCount = graph.meta.nodeCount;
+  measure.edgeCount = graph.meta.edgeCount;
+  measure.mark('enrich');
 
   // graph.json is its own Tier-2 cache: fold in the prior meaning layer so an
   // unchanged body is never re-summarized (and a Tier-1-only run never wipes it).
@@ -347,6 +419,7 @@ export async function buildGraph(
     const { enrichWithLsp } = await import("./lsp/enrich.js");
     const r = await enrichWithLsp(graph, root);
     graph.meta.edgeCount = graph.edges.length;
+    measure.edgeCount = graph.meta.edgeCount;
     opts.onProgress?.({ phase: "enrich", index: r.added, total: r.queried, file: `lsp:${r.server ?? "none"}` });
   }
 
@@ -357,6 +430,9 @@ export async function buildGraph(
     graph.edges.push(...await disambiguateEdges(nodes, rawEdges, graph.edges, opts.edgeDisambiguator));
     graph.meta.edgeCount = graph.edges.length;
   }
+  measure.edgeCount = graph.meta.edgeCount;
+  measure.errorCount = errors.length;
+  measure.mark('write');
 
   const graphPath = writeGraph(graph, outDir);
   // Keep one exact file snapshot for every file that still has a ready meaning.
@@ -419,6 +495,8 @@ export async function buildGraph(
     // OKF↔Wiring link). No-op when there are no concept nodes (a $0 build).
     writeCovers(graph, outDir);
   }
+
+  measure.errorCount = errors.length;
 
   const byKind = {} as Record<Kind, number>;
   for (const n of nodes) byKind[n.kind] = (byKind[n.kind] ?? 0) + 1;

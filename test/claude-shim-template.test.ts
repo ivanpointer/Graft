@@ -6,11 +6,14 @@ import { statuslineShim, hooksShim } from '../src/claude/shim-template.js';
 const BAKED = '/opt/graft/dist/claude';
 
 for (const [name, src] of [['statusline', statuslineShim(BAKED)], ['hooks', hooksShim(BAKED)]] as const) {
-  test(`${name} shim parses and knows all four candidates (baked, node_modules, lib, npm root -g)`, () => {
+  test(`${name} shim parses and knows the Nix system profile plus four fallback candidates`, () => {
     const body = src.replace(/^#!.*\n/, ''); // strip shebang for vm
     assert.doesNotThrow(() => new vm.Script(body), 'valid JS');
 
-    // 1. baked dir is present as the first candidate
+    // 0. stable Nix profile wins over a stale baked store path
+    assert.match(src, /execFileSync\('\/run\/current-system\/sw\/bin\/graft-claude-dir', \[\]/);
+    assert.match(src, /const nixSystem = nixClaudeDir\(\)/);
+    // 1. baked dir is present as the first fallback candidate
     assert.match(src, new RegExp(`const BAKED = "${BAKED}"`));
     // 2. repo node_modules via require.resolve from the project dir
     assert.match(src, /require\.resolve\('@nanonets\/graft\/package\.json', \{ paths: \[base\] \}\)/);

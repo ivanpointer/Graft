@@ -10,7 +10,7 @@ test('empty settings gets the full Graft blocks', () => {
   assert.equal(merged.subagentStatusLine.command, SL);
   assert.ok(Array.isArray(merged.hooks.PostToolUse));
   assert.equal(merged.hooks.PostToolUse[0].matcher, 'Write|Edit|MultiEdit');
-  for (const e of ['PostToolUse', 'UserPromptSubmit', 'SessionStart', 'Stop']) {
+  for (const e of ['PostToolUse', 'UserPromptSubmit', 'SessionStart', 'PostModelSwitch', 'Stop']) {
     assert.ok(merged.hooks[e][0].hooks[0].command.includes('graft-hooks.cjs'), `${e} wired`);
   }
   // PostToolUse carries a second graft block: the usage-mix + tokens-saved
@@ -79,13 +79,18 @@ test('GRAFT_NO_STATUSLINE=1 skips installing a statusLine', () => {
 });
 
 test('existing foreign hooks are preserved; Graft appended', () => {
-  const existing = { hooks: { PostToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'mine.sh' }] }] } };
+  const existing = { hooks: {
+    PostToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'mine.sh' }] }],
+    PostModelSwitch: [{ hooks: [{ type: 'command', command: 'keep-model-hook.sh' }] }],
+  } };
   const { merged } = mergeGraftSettings(existing);
   // foreign block + graft's two PostToolUse blocks (post-edit, tool-savings).
   assert.equal(merged.hooks.PostToolUse.length, 3);
   assert.equal(merged.hooks.PostToolUse[0].hooks[0].command, 'mine.sh');
   assert.ok(merged.hooks.PostToolUse[1].hooks[0].command.includes('graft-hooks.cjs'));
   assert.ok(merged.hooks.PostToolUse[2].hooks[0].command.includes('graft-hooks.cjs'));
+  assert.equal(merged.hooks.PostModelSwitch[0].hooks[0].command, 'keep-model-hook.sh');
+  assert.ok(merged.hooks.PostModelSwitch[1].hooks[0].command.includes('post-model-switch'));
 });
 
 test('re-running is idempotent (no duplicate Graft entries or footer)', () => {
@@ -93,6 +98,7 @@ test('re-running is idempotent (no duplicate Graft entries or footer)', () => {
   const twice = mergeGraftSettings(once).merged;
   assert.equal(twice.hooks.PostToolUse.length, 2); // post-edit + tool-savings, not duplicated
   assert.equal(twice.hooks.Stop.length, 1);
+  assert.equal(twice.hooks.PostModelSwitch.length, 1);
   assert.equal(twice.footerLinksRegexes.filter((r: string) => r === 'graft/[\\w./-]+\\.md').length, 1);
 });
 

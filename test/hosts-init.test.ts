@@ -6,7 +6,6 @@ import assert from 'node:assert/strict';
 process.env.GRAFT_MCP_NPX = '1';
 import { mkdirSync, readFileSync, readdirSync, writeFileSync, existsSync } from 'node:fs';
 import { join, sep } from 'node:path';
-import { execFileSync } from 'node:child_process';
 import { runHostsInit } from '../src/hosts/init.js';
 import { toPosixPath } from '../src/util/paths.js';
 import { runCli, tmpRepo } from './helpers.js';
@@ -55,20 +54,16 @@ test('preserves user content around the fenced section', () => {
 });
 
 test('CLI: graft init --agents gemini writes GEMINI.md and exits 0', () => {
-  const repo = fresh();
-  execFileSync(process.execPath, ['--import', 'tsx', 'src/cli.ts', 'init', repo, '--no-build', '--agents', 'gemini'], {
-    encoding: 'utf8',
-  });
+  const repo = fresh(); const home = fresh();
+  const result = runCli(['init', repo, '--no-build', '--agents', 'gemini'], { home });
+  assert.equal(result.status, 0, result.describe());
   assert.ok(readFileSync(join(repo, 'GEMINI.md'), 'utf8').includes('graft ask'));
 });
 
 test('CLI: unknown agent id exits non-zero', () => {
-  const repo = fresh();
-  assert.throws(() =>
-    execFileSync(process.execPath, ['--import', 'tsx', 'src/cli.ts', 'init', repo, '--no-build', '--agents', 'nope'], {
-      encoding: 'utf8', stdio: 'pipe',
-    }),
-  );
+  const repo = fresh(); const home = fresh();
+  const result = runCli(['init', repo, '--no-build', '--agents', 'nope'], { home });
+  assert.notEqual(result.status, 0, result.describe());
 });
 
 test('explicit empty agents list writes nothing, even when home has agent dirs (no fallback to detection)', () => {
@@ -80,10 +75,9 @@ test('explicit empty agents list writes nothing, even when home has agent dirs (
 });
 
 test('CLI: --agents claude with --no-build writes .claude/ but no other-agent files', () => {
-  const repo = fresh();
-  execFileSync(process.execPath, ['--import', 'tsx', 'src/cli.ts', 'init', repo, '--no-build', '--agents', 'claude'], {
-    encoding: 'utf8',
-  });
+  const repo = fresh(); const home = fresh();
+  const result = runCli(['init', repo, '--no-build', '--agents', 'claude'], { home });
+  assert.equal(result.status, 0, result.describe());
   assert.ok(existsSync(join(repo, '.claude')));
   assert.ok(!existsSync(join(repo, 'AGENTS.md')));
   assert.ok(!existsSync(join(repo, 'GEMINI.md')));
@@ -91,14 +85,9 @@ test('CLI: --agents claude with --no-build writes .claude/ but no other-agent fi
 });
 
 test('CLI: --agents claude gemini nope exits non-zero and leaves repo untouched (validation before writes)', () => {
-  const repo = fresh();
-  assert.throws(() =>
-    execFileSync(
-      process.execPath,
-      ['--import', 'tsx', 'src/cli.ts', 'init', repo, '--no-build', '--agents', 'claude', 'gemini', 'nope'],
-      { encoding: 'utf8', stdio: 'pipe' },
-    ),
-  );
+  const repo = fresh(); const home = fresh();
+  const result = runCli(['init', repo, '--no-build', '--agents', 'claude', 'gemini', 'nope'], { home });
+  assert.notEqual(result.status, 0, result.describe());
   assert.ok(!existsSync(join(repo, '.claude')));
   assert.ok(!existsSync(join(repo, 'GEMINI.md')));
   assert.ok(!existsSync(join(repo, 'AGENTS.md')));
@@ -123,8 +112,9 @@ test('mcp: false skips MCP registration', () => {
 });
 
 test('CLI: --no-mcp writes the rule file but no MCP config', () => {
-  const repo = fresh();
-  execFileSync(process.execPath, ['--import', 'tsx', 'src/cli.ts', 'init', repo, '--no-build', '--agents', 'cursor', '--no-mcp'], { encoding: 'utf8' });
+  const repo = fresh(); const home = fresh();
+  const result = runCli(['init', repo, '--no-build', '--agents', 'cursor', '--no-mcp'], { home });
+  assert.equal(result.status, 0, result.describe());
   assert.ok(existsSync(join(repo, '.cursor', 'rules', 'graft.mdc')));
   assert.ok(!existsSync(join(repo, '.cursor', 'mcp.json')));
 });
@@ -153,7 +143,7 @@ test('global: false keeps the instruction file but skips every ~ write', () => {
 
   assert.deepEqual(r.written.map((w) => w.id), ['agents']);
   assert.ok(existsSync(join(repo, 'AGENTS.md')));
-  assert.deepEqual(r.hooks, []);
+  assert.deepEqual(r.hooks.map((h) => h.id), ['opencode-attribution-plugin']);
   assert.ok(!existsSync(join(home, '.codex', 'hooks.json')));
   assert.ok(!existsSync(join(home, '.codex', 'config.toml')));
   // The repo-local opencode MCP config is not a global write, so it survives.
@@ -172,8 +162,8 @@ test('global: false keeps the instruction file but skips every ~ write', () => {
  * `HOME`, so on Windows the child read the *runner's* profile and reported
  * whichever agents it happened to have installed instead of the fixture's.
  */
-function cliStderr(repo: string, home: string, extra: string[] = []): string {
-  const res = runCli(['init', repo, '--no-build', ...extra], { home });
+function cliStderr(repo: string, home: string, extra: string[] = [], env?: NodeJS.ProcessEnv): string {
+  const res = runCli(['init', repo, '--no-build', ...extra], { home, env });
   assert.equal(res.status, 0, res.describe());
   return res.stderr ?? '';
 }
@@ -191,7 +181,7 @@ test('CLI: no flags and no TTY writes nothing and names the detected agents', ()
 test('CLI: --dry-run prints the plan, both sections, and writes nothing', () => {
   const home = fresh(); const repo = fresh();
   mkdirSync(join(home, '.codex'), { recursive: true });
-  const out = cliStderr(repo, home, ['--dry-run']);
+  const out = cliStderr(repo, home, ['--dry-run'], { GRAFT_NO_GLOBAL_WIRING: '0' });
 
   assert.match(out, /would write — this repo:/);
   // The plan prints display paths, which keep the platform separator.
@@ -218,7 +208,7 @@ test('CLI: --yes wires every detected agent (the pre-0.8 default)', () => {
 test('CLI: --no-global writes AGENTS.md but leaves ~/.codex alone', () => {
   const home = fresh(); const repo = fresh();
   mkdirSync(join(home, '.codex'), { recursive: true });
-  const out = cliStderr(repo, home, ['--agents', 'agents', '--no-global']);
+  const out = cliStderr(repo, home, ['--agents', 'agents', '--no-global', '--verbose']);
   assert.ok(existsSync(join(repo, 'AGENTS.md')));
   assert.deepEqual(readdirSync(join(home, '.codex')), []);
   assert.match(out, /skipped out-of-repo writes/);
@@ -227,17 +217,10 @@ test('CLI: --no-global writes AGENTS.md but leaves ~/.codex alone', () => {
 test('CLI: GRAFT_NO_GLOBAL_WIRING leaves global config to an external manager', () => {
   const home = fresh(); const repo = fresh();
   mkdirSync(join(home, '.codex'), { recursive: true });
-  const previous = process.env.GRAFT_NO_GLOBAL_WIRING;
-  process.env.GRAFT_NO_GLOBAL_WIRING = '1';
-  try {
-    const out = cliStderr(repo, home, ['--agents', 'agents']);
-    assert.ok(existsSync(join(repo, 'AGENTS.md')));
-    assert.deepEqual(readdirSync(join(home, '.codex')), []);
-    assert.match(out, /skipped out-of-repo writes/);
-  } finally {
-    if (previous === undefined) delete process.env.GRAFT_NO_GLOBAL_WIRING;
-    else process.env.GRAFT_NO_GLOBAL_WIRING = previous;
-  }
+  const out = cliStderr(repo, home, ['--agents', 'agents'], { GRAFT_NO_GLOBAL_WIRING: '1' });
+  assert.ok(existsSync(join(repo, 'AGENTS.md')));
+  assert.deepEqual(readdirSync(join(home, '.codex')), []);
+  assert.match(out, /skipped out-of-repo writes/);
 });
 
 test('CLI: the graph build is attempted even when claude is not selected', () => {
@@ -246,7 +229,7 @@ test('CLI: the graph build is attempted even when claude is not selected', () =>
   // Regression: the build used to sit inside `if (wantClaude)`, so picking only
   // cursor wired .cursor/ and never built the graph its rule file points at.
   const out = cliStderr(repo, home, ['--agents', 'cursor']);
-  assert.match(out, /(built the graph|skipped graph build)/);
+  assert.match(out, /(built the graph|graph built|skipped graph build|skipped the graph build)/);
 });
 
 test('CLI: --no-global stays quiet when the selection has nothing out-of-repo', () => {

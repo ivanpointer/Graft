@@ -26,6 +26,8 @@ export interface ChatModelConfig {
   provider: ProviderKind;
   apiKey: string;
   model: string;
+  /** OpenAI-compatible `reasoning_effort`, when the selected endpoint supports it. */
+  reasoningEffort?: string;
   baseUrl?: string;
   /** Extra default headers for OpenAI-compatible endpoints (e.g. OpenRouter `X-Title`). */
   headers?: Record<string, string>;
@@ -39,6 +41,7 @@ export function createChatModel(cfg: ChatModelConfig): ChatModel {
       return new OpenAIChatModel({
         apiKey: cfg.apiKey,
         model: cfg.model,
+        reasoningEffort: cfg.reasoningEffort,
         baseUrl: cfg.baseUrl,
         headers: cfg.headers,
       });
@@ -46,6 +49,7 @@ export function createChatModel(cfg: ChatModelConfig): ChatModel {
       return new LiteLLMChatModel({
         apiKey: cfg.apiKey,
         model: cfg.model,
+        reasoningEffort: cfg.reasoningEffort,
         baseUrl: cfg.baseUrl,
         headers: cfg.headers,
       });
@@ -53,6 +57,7 @@ export function createChatModel(cfg: ChatModelConfig): ChatModel {
       return new OrcaRouterChatModel({
         apiKey: cfg.apiKey,
         model: cfg.model,
+        reasoningEffort: cfg.reasoningEffort,
         baseUrl: cfg.baseUrl,
         headers: cfg.headers,
       });
