@@ -60,6 +60,18 @@ test('CLI: graft init --agents gemini writes GEMINI.md and exits 0', () => {
   assert.ok(readFileSync(join(repo, 'GEMINI.md'), 'utf8').includes('graft ask'));
 });
 
+test('CLI: wiring one repo for Gemini does not retract machine-wide Codex MCP', () => {
+  const repo = fresh(); const home = fresh();
+  mkdirSync(join(home, '.codex'), { recursive: true });
+  const config = join(home, '.codex', 'config.toml');
+  const original = '[mcp_servers.graft]\ncommand = "/custom/graft"\nargs = ["mcp"]\n\n' +
+    '[mcp_servers.graft.env]\nGRAFT_HARNESS_HOST = "codex"\n';
+  writeFileSync(config, original);
+  const result = runCli(['init', repo, '--no-build', '--agents', 'gemini'], { home });
+  assert.equal(result.status, 0, result.describe());
+  assert.equal(readFileSync(config, 'utf8'), original);
+});
+
 test('CLI: unknown agent id exits non-zero', () => {
   const repo = fresh(); const home = fresh();
   const result = runCli(['init', repo, '--no-build', '--agents', 'nope'], { home });

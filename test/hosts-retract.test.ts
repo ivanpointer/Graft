@@ -113,6 +113,18 @@ test('[mcp_servers.graft] is removed and the neighbouring table survives', () =>
   assert.ok(!text.startsWith('\n'), 'no leading blank line left behind');
 });
 
+test('retract removes graft env subtable with its parent', () => {
+  const d = fresh();
+  const toml = write(d, join('.grok', 'config.toml'),
+    '[mcp_servers.graft]\ncommand = "graft"\n\n' +
+    '[mcp_servers.graft.env]\nGRAFT_HARNESS_HOST = "grok"\n\n' +
+    '[mcp_servers.keepme]\ncommand = "other"\n');
+  runRetract(d, { apply: true, global: false });
+  const text = readFileSync(toml, 'utf8');
+  assert.ok(!text.includes('mcp_servers.graft'));
+  assert.ok(text.includes('[mcp_servers.keepme]'));
+});
+
 // --------------------------------------------------------------------------
 // .claude/settings.json — graft's fragments inside a file the user owns
 // --------------------------------------------------------------------------

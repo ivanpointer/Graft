@@ -1,7 +1,8 @@
 /**
  * Register the graft MCP server in each host's config.
  * JSON hosts get a keyed merge (other servers preserved; unparseable files
- * are never rewritten). The TOML host gets an append-if-absent section.
+ * are never rewritten). Codex TOML keeps existing transport and other options
+ * when adding the harness env; Grok's repo-local entry is Graft-owned.
  *
  * `mcpTargets()` is the pure "which files would this touch" half, so `graft
  * init --dry-run` and the picker can report paths without writing;
@@ -98,41 +99,101 @@ export function mergeJsonKey(id: string, path: string, topKey: string, entry: ob
 
 /** The `[mcp_servers.graft]` table header, as written and as matched. */
 const TOML_HEADER = '[mcp_servers.graft]';
+const TOML_ENV_HEADER = '[mcp_servers.graft.env]';
+
+function matchesTomlHeader(line: string, header: string): boolean {
+  const trimmed = line.trim();
+  return trimmed === header || (trimmed.startsWith(header) && /^\s*#/.test(trimmed.slice(header.length)));
+}
 
 /**
- * Remove the `[mcp_servers.graft]` table from a TOML config, returning the rest.
+ * Remove the `[mcp_servers.graft]` table and its child tables from a TOML
+ * config, returning the rest. Leaving `[mcp_servers.graft.env]` behind creates
+ * a server with no transport, which prevents Codex from loading its config.
  *
  * Line-based on purpose: a real parse-and-reserialize would reformat the user's
- * whole file. The table runs from its header to the next `[`-header or EOF, which
- * is exactly the shape {@link upsertCodexToml} appends. Exported so the writer and
- * `retract.ts` can never disagree about what "graft's section" means.
+ * whole file. Each graft table runs to the next table header or EOF, including
+ * child tables such as `.env`. Exported for the retract path.
  */
 export function stripTomlSection(text: string): { rest: string; found: boolean } {
   const lines = text.split('\n');
-  const start = lines.findIndex((l) => l.trim() === TOML_HEADER);
-  if (start === -1) return { rest: text, found: false };
-  let end = start + 1;
-  while (end < lines.length && !lines[end].trimStart().startsWith('[')) end++;
-  const rest = [...lines.slice(0, start), ...lines.slice(end)]
+  const kept: string[] = [];
+  let removing = false;
+  let found = false;
+  for (const line of lines) {
+    if (line.trimStart().startsWith('[')) {
+      removing = /^\s*\[\[?mcp_servers\.graft(?:\.[^\]]+)?\]\]?(?:\s*#.*)?\s*$/.test(line);
+      if (removing) found = true;
+    }
+    if (!removing) kept.push(line);
+  }
+  if (!found) return { rest: text, found: false };
+  const rest = kept
     .join('\n')
     .replace(/\n{3,}/g, '\n\n')
     .replace(/^\n+/, '');
   return { rest, found: true };
 }
 
+/** Add only the missing pieces of a Codex MCP entry; never rewrite its launch
+ * command, args, URL, env values, or other user-managed options. */
+function mergeCodexToml(text: string, command: string, args: string[]): string {
+  const lines = text.split('\n');
+  const argList = args.map((a) => JSON.stringify(a)).join(', ');
+  const commandLine = `command = ${JSON.stringify(command)}`;
+  const argsLine = `args = [${argList}]`;
+  let parent = lines.findIndex((line) => matchesTomlHeader(line, TOML_HEADER));
+  if (parent === -1) {
+    const env = lines.findIndex((line) => matchesTomlHeader(line, TOML_ENV_HEADER));
+    if (env === -1) {
+      return appendSection(text, `${TOML_HEADER}\n${commandLine}\n${argsLine}\n\n${TOML_ENV_HEADER}\nGRAFT_HARNESS_HOST = "codex"\n`);
+    }
+    lines.splice(env, 0, TOML_HEADER, commandLine, argsLine, '');
+    parent = env;
+  } else {
+    let end = parent + 1;
+    while (end < lines.length && !lines[end].trimStart().startsWith('[')) end++;
+    const body = lines.slice(parent + 1, end);
+    const hasCommand = body.some((line) => /^\s*command\s*=/.test(line));
+    const hasUrl = body.some((line) => /^\s*url\s*=/.test(line));
+    if (!hasCommand && !hasUrl) {
+      const additions = [commandLine];
+      if (!body.some((line) => /^\s*args\s*=/.test(line))) additions.push(argsLine);
+      lines.splice(parent + 1, 0, ...additions);
+    }
+    if (hasUrl) return lines.join('\n'); // HTTP servers do not use a process env.
+    if (body.some((line) => /^\s*env\s*=/.test(line))) return lines.join('\n'); // Inline env already owns this key.
+  }
+
+  const env = lines.findIndex((line) => matchesTomlHeader(line, TOML_ENV_HEADER));
+  if (env === -1) return appendSection(lines.join('\n'), `${TOML_ENV_HEADER}\nGRAFT_HARNESS_HOST = "codex"\n`);
+  let end = env + 1;
+  while (end < lines.length && !lines[end].trimStart().startsWith('[')) end++;
+  if (!lines.slice(env + 1, end).some((line) => /^\s*GRAFT_HARNESS_HOST\s*=/.test(line))) {
+    lines.splice(env + 1, 0, 'GRAFT_HARNESS_HOST = "codex"');
+  }
+  return lines.join('\n');
+}
+
 /**
- * Register graft in a TOML config, replacing any section a previous version left.
+ * Register graft in a TOML config. Codex keeps existing transport and options;
+ * Grok's repo-local Graft-owned entry converges to the current launch command.
  *
- * The old behaviour was to skip entirely once the header existed, which froze the
- * launch command at whatever the first init wrote: a repo wired when graft wasn't
- * on PATH kept the slow `npx` form forever, and no upgrade could correct it. Strip
- * and re-append instead, so this converges like every other writer — foreign
- * tables are untouched either way.
+ * Grok previously skipped an existing header, freezing the launch command at
+ * the first init's value. Its replace path still repairs stale Graft-owned
+ * entries; Codex may be managed by another tool, so its table is merged.
  */
 function upsertCodexToml(id: string, path: string): McpWrite {
   const existed = existsSync(path);
   const text = existed ? readFileSync(path, 'utf8') : '';
   const { command, args } = serverEntry();
+  if (id === 'codex') {
+    const merged = mergeCodexToml(text, command, args);
+    if (merged === text) return { id, path, action: 'unchanged' };
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, merged);
+    return { id, path, action: existed ? 'updated' : 'created' };
+  }
   const argList = args.map((a) => JSON.stringify(a)).join(", ");
   const section = `${TOML_HEADER}\ncommand = \"${command}\"\nargs = [${argList}]\n`;
 

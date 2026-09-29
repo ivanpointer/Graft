@@ -52,6 +52,7 @@ test('agents id: codex TOML + opencode JSON, gated on home dirs', () => {
   const toml = readFileSync(join(home, '.codex', 'config.toml'), 'utf8');
   assert.match(toml, /^\[mcp_servers\.graft\]$/m);
   assert.match(toml, /"@nanonets\/graft"/);
+  assert.match(toml, /\[mcp_servers\.graft\.env\]\nGRAFT_HARNESS_HOST = "codex"/);
   const oc = JSON.parse(readFileSync(join(repo, 'opencode.json'), 'utf8'));
   assert.equal(oc.mcp.graft.type, 'local');
   const again = registerMcpConfigs(repo, ['agents'], { home });
@@ -67,6 +68,71 @@ test('codex TOML append preserves existing content', () => {
   assert.match(toml, /model = "o3"/);
   assert.match(toml, /\[mcp_servers\.other\]/);
   assert.match(toml, /\[mcp_servers\.graft\]/);
+});
+
+test('Codex harness env patch preserves an existing MCP transport and options', () => {
+  const repo = fresh(); const home = fresh();
+  mkdirSync(join(home, '.codex'), { recursive: true });
+  const path = join(home, '.codex', 'config.toml');
+  writeFileSync(path,
+    '[mcp_servers.graft]\n' +
+    'command = "/custom/graft"\n' +
+    'args = ["mcp", "--custom"]\n' +
+    'startup_timeout_sec = 42\n\n' +
+    '[mcp_servers.graft.env]\n' +
+    'OTHER_VAR = "keep"\n\n' +
+    '[mcp_servers.other]\nurl = "https://example.test/mcp"\n');
+
+  assert.equal(registerMcpConfigs(repo, ['agents'], { home })[0].action, 'updated');
+  const toml = readFileSync(path, 'utf8');
+  assert.match(toml, /\[mcp_servers\.graft\]\ncommand = "\/custom\/graft"\nargs = \["mcp", "--custom"\]\nstartup_timeout_sec = 42/);
+  assert.match(toml, /\[mcp_servers\.graft\.env\]\nGRAFT_HARNESS_HOST = "codex"\nOTHER_VAR = "keep"/);
+  assert.match(toml, /\[mcp_servers\.other\]\nurl = "https:\/\/example\.test\/mcp"/);
+  assert.equal(registerMcpConfigs(repo, ['agents'], { home })[0].action, 'unchanged');
+});
+
+test('Codex repairs a transport-less MCP entry before its existing env subtable', () => {
+  const repo = fresh(); const home = fresh();
+  mkdirSync(join(home, '.codex'), { recursive: true });
+  const path = join(home, '.codex', 'config.toml');
+  writeFileSync(path, '[mcp_servers.graft.env]\nGRAFT_HARNESS_HOST = "codex"\n');
+  registerMcpConfigs(repo, ['agents'], { home });
+  const toml = readFileSync(path, 'utf8');
+  assert.match(toml, /^\[mcp_servers\.graft\]\ncommand = "npx"\nargs = \["-y", "@nanonets\/graft", "mcp"\]/);
+  assert.ok(toml.indexOf('[mcp_servers.graft]') < toml.indexOf('[mcp_servers.graft.env]'));
+  assert.equal((toml.match(/\[mcp_servers\.graft\]/g) ?? []).length, 1);
+});
+
+test('Codex keeps an existing HTTP MCP transport and its options', () => {
+  const repo = fresh(); const home = fresh();
+  mkdirSync(join(home, '.codex'), { recursive: true });
+  const path = join(home, '.codex', 'config.toml');
+  const original = '[mcp_servers.graft]\nurl = "https://example.test/mcp"\nenabled = false\n';
+  writeFileSync(path, original);
+  assert.equal(registerMcpConfigs(repo, ['agents'], { home })[0].action, 'unchanged');
+  assert.equal(readFileSync(path, 'utf8'), original);
+});
+
+test('Codex leaves an inline env table intact', () => {
+  const repo = fresh(); const home = fresh();
+  mkdirSync(join(home, '.codex'), { recursive: true });
+  const path = join(home, '.codex', 'config.toml');
+  const original = '[mcp_servers.graft]\ncommand = "/custom/graft"\nargs = ["mcp"]\n' +
+    'env = { GRAFT_HARNESS_HOST = "codex", OTHER_VAR = "keep" }\n';
+  writeFileSync(path, original);
+  assert.equal(registerMcpConfigs(repo, ['agents'], { home })[0].action, 'unchanged');
+  assert.equal(readFileSync(path, 'utf8'), original);
+});
+
+test('Codex recognizes MCP table headers with comments', () => {
+  const repo = fresh(); const home = fresh();
+  mkdirSync(join(home, '.codex'), { recursive: true });
+  const path = join(home, '.codex', 'config.toml');
+  const original = '[mcp_servers.graft] # managed elsewhere\ncommand = "/custom/graft"\nargs = ["mcp"]\n\n' +
+    '[mcp_servers.graft.env] # host hint\nGRAFT_HARNESS_HOST = "codex"\n';
+  writeFileSync(path, original);
+  assert.equal(registerMcpConfigs(repo, ['agents'], { home })[0].action, 'unchanged');
+  assert.equal(readFileSync(path, 'utf8'), original);
 });
 
 test('grok gets a repo-local TOML MCP section', () => {
