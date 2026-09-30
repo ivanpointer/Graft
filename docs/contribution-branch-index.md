@@ -17,8 +17,8 @@ request head.
 
 ## Stacked deep-hook work
 
-1. Existing upstream PR #489 (`feat/cli-deep-hooks`) is the parent and remains
-   unchanged.
+1. The preserved fork branch from closed upstream PR #489
+   (`feat/cli-deep-hooks`) is the parent and remains unchanged.
 2. `contrib/deep-hooks-followup` adds per-item routing, safe semantic reuse,
    bounded symbol change context, and the related tests.
 3. `contrib/deep-routing-cache-followup` depends on the preceding branch and
@@ -59,9 +59,9 @@ preserved rather than force-merged.
   above.
 * The generated Nix-aware helper refreshes are local-only; the underlying
   portable shim fixes live in `contrib/nix-claude-shim-resolution`.
-* PR #489 remains open because Ivan identified the deep/JEV work as the current
-  priority. PRs #504 and #505 were closed during cleanup after no human
-  maintainer activity; their fork branches remain intact.
+* PRs #489, #504, and #505 were closed during cleanup after no human maintainer
+  activity; their fork branches, including the stacked deep-hook follow-ups,
+  remain intact. No replacement PRs were opened.
 * The source-window work is already incorporated in PR #274, and repository
   metadata PR #488 is already merged upstream.
 * Repository metadata PR #488 is already merged upstream and is excluded.
