@@ -230,7 +230,7 @@ test('CLI: GRAFT_NO_GLOBAL_WIRING leaves global config to an external manager', 
   const previous = process.env.GRAFT_NO_GLOBAL_WIRING;
   process.env.GRAFT_NO_GLOBAL_WIRING = '1';
   try {
-    const out = cliStderr(repo, home, ['--agents', 'agents']);
+    const out = cliStderr(repo, home, ['--agents', 'agents', '--verbose']);
     assert.ok(existsSync(join(repo, 'AGENTS.md')));
     assert.deepEqual(readdirSync(join(home, '.codex')), []);
     assert.match(out, /skipped out-of-repo writes/);
