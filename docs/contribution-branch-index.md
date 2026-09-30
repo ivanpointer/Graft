@@ -13,6 +13,7 @@ request head.
 | `contrib/pi-host` | Pi host registration and machine-global MCP planning. | Build plus Pi registry/config/plan tests; three CLI init cases are sandbox-blocked because they read the real Codex config. |
 | `contrib/global-wiring-policy` | Let an external manager opt out of Graft's global wiring while retaining repo-local setup. | Global-policy, host-init, and upkeep tests. |
 | `contrib/js-yaml-pin` | Pin transitive `js-yaml` to 3.15.2. | Build and lockfile dependency check. |
+| `contrib/nix-claude-shim-resolution` | Resolve the current Nix Graft package and its assets through the system profile. | Claude shim-template tests. |
 
 ## Stacked deep-hook work
 
@@ -23,21 +24,46 @@ request head.
 3. `contrib/deep-routing-cache-followup` depends on the preceding branch and
    adds worktree cache reuse plus routing from preserved source snapshots.
 
-Submit the parent first. After it lands, rebase the follow-up on current
-upstream before opening it; then submit the cache follow-up after the first
-follow-up.
+This is a dependency chain only, not a submission recommendation: the parent
+must land before its two follow-ups can be made independent of it.
 
-## Preserved but intentionally not resubmitted
+## Node-22 stats work in progress
 
-* The closed stats PR #501 and its existing `stats-machine-store` branch remain
-  intact. Its `node:sqlite` implementation does not run on Node 20, so a new
-  contribution branch must wait for the requested design issue and a
-  Node-20-compatible storage decision.
+`wip/node22-stats-store-core` is a fork-only, explicitly Node-22-dependent
+forward port of the reviewable storage core from closed PR #501. It contains
+machine-local invocation recording, optional history backup, local-only storage,
+and the session-column migration. Its manifest retains `node >=22.5.0` because
+it uses `node:sqlite`; it is not submission-ready for upstream's Node 20 floor.
+
+The remaining original stats commits are preserved on `stats-machine-store` and
+`dogfood/all-in-flight`, with these real boundaries:
+
+| Area | Original commits | Depends on |
+| --- | --- | --- |
+| Unified fact schema and session instrumentation | `dad0ec2`, `39a4f58` | Node-22 store core; it touches the current Claude hook lifecycle, MCP tools, and telemetry sessions. |
+| Configuration and invocation attribution | `410dc44` through `61aa123` | Unified fact schema and session instrumentation. |
+| Graph-build performance facts and CLI report | `ef8a773`, `aaa5da5` | Unified fact schema (schema migration 8), then the stats CLI wiring. |
+| Gemini/OpenCode and native host adapters | `f83714f` through `f9a0d76` | Invocation attribution, exact invocation IDs, and host lifecycle wiring. |
+
+The exact design decision needed before these can become upstream-ready is the
+maintainer-requested Node-20-compatible local-storage strategy: either select a
+Node-20-compatible store or explicitly adopt a higher supported Node floor and
+align CI. Forward-porting the later fact-schema commits before that decision
+would also overwrite later Trail-hook lifecycle changes, so they remain
+preserved rather than force-merged.
+
+## Local-only and already-submitted work
+
 * `.claude/helpers`, `.claude/skills`, and the repository-root `.mcp.json` from
   dogfood are local/dogfooding configuration and are not included in any branch
   above.
-* Existing submissions are left alone: Terraform/HCL PR #504, Codex MCP draft
-  PR #505, and the incorporated source-window work from PR #274.
+* The generated Nix-aware helper refreshes are local-only; the underlying
+  portable shim fixes live in `contrib/nix-claude-shim-resolution`.
+* PR #489 remains open because Ivan identified the deep/JEV work as the current
+  priority. PRs #504 and #505 were closed during cleanup after no human
+  maintainer activity; their fork branches remain intact.
+* The source-window work is already incorporated in PR #274, and repository
+  metadata PR #488 is already merged upstream.
 * Repository metadata PR #488 is already merged upstream and is excluded.
 
 ## Protected refs
