@@ -84,6 +84,12 @@ test('current Nix system-profile install wins over still-present baked and npm p
   }, prefix), '1.0.0');
 });
 
+test('generated host shim includes NixOS and nix-darwin system-profile locators', () => {
+  const src = geminiAttributionShim();
+  assert.match(src, /\/run\/current-system\/sw\/bin\/graft-claude-dir/);
+  assert.match(src, /\/nix\/var\/nix\/profiles\/system\/sw\/bin\/graft-claude-dir/);
+});
+
 test('OpenCode plugin uses the project install when it is newer than baked/global', () => {
   const root = fresh();
   const repo = join(root, 'repo');

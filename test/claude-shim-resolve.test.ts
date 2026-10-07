@@ -63,7 +63,14 @@ function isolate(root: string): { preload: string; env: NodeJS.ProcessEnv } {
   writeFileSync(preload, `Object.defineProperty(process, 'execPath', { value: ${JSON.stringify(execPath)}, configurable: true });\n`);
   const prefix = join(root, 'npm-prefix');
   mkdirSync(prefix, { recursive: true });
-  return { preload, env: { npm_config_prefix: prefix } };
+  return {
+    preload,
+    env: {
+      npm_config_prefix: prefix,
+      // Keep the real machine's Nix profile out of these resolution fixtures.
+      GRAFT_NIX_CLAUDE_DIR: join(root, 'missing-nix-profile'),
+    },
+  };
 }
 
 /** Runs the shim with the given baked dir and project dir; returns the version

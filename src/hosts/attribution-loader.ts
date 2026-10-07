@@ -12,7 +12,10 @@ export interface AttributionLoaderOptions {
 
 function loader(options: AttributionLoaderOptions = {}): string {
   const bakedPath = options.bakedPath ?? baked;
-  const nixLocator = options.nixLocator ?? { command: '/run/current-system/sw/bin/graft-claude-dir', args: [] };
+  const nixLocators = options.nixLocator ? [options.nixLocator] : [
+    { command: '/run/current-system/sw/bin/graft-claude-dir', args: [] },
+    { command: '/nix/var/nix/profiles/system/sw/bin/graft-claude-dir', args: [] },
+  ];
   return `
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -21,7 +24,7 @@ import { execFileSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 const require = createRequire(import.meta.url);
 const BAKED = ${JSON.stringify(bakedPath)};
-const NIX_LOCATOR = ${JSON.stringify(nixLocator)};
+const NIX_LOCATORS = ${JSON.stringify(nixLocators)};
 const loaded = new Map();
 
 function fromPkg(base) {
@@ -32,13 +35,16 @@ function fromPkg(base) {
 }
 
 function nixSystem() {
-  try {
-    // The stable profile command returns dist/claude; hosts is its sibling.
-    const dir = execFileSync(NIX_LOCATOR.command, NIX_LOCATOR.args, {
-      encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 2000,
-    }).trim();
-    return dir ? join(dir, '..', 'hosts', 'native-attribution.js') : null;
-  } catch { return null; }
+  for (const locator of NIX_LOCATORS) {
+    try {
+      // The stable profile command returns dist/claude; hosts is its sibling.
+      const dir = execFileSync(locator.command, locator.args, {
+        encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 2000,
+      }).trim();
+      if (dir) return join(dir, '..', 'hosts', 'native-attribution.js');
+    } catch { /* try the next platform profile */ }
+  }
+  return null;
 }
 
 function globalInstall() {

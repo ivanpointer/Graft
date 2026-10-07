@@ -46,12 +46,23 @@ function globalRoot() {
 
 // Nix's system profile exposes executables but does not merge arbitrary share/
 // subdirectories. This tiny companion command prints the package-owned Claude
-// asset directory through the stable /run/current-system profile.
+// asset directory through the stable system profile. NixOS exposes that
+// profile under /run/current-system, while nix-darwin uses the durable system
+// profile under /nix/var/nix/profiles/system.
 function nixClaudeDir() {
-  try {
-    const dir = execFileSync('/run/current-system/sw/bin/graft-claude-dir', [], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
-    return dir || null;
-  } catch { return null; }
+  const configured = process.env.GRAFT_NIX_CLAUDE_DIR;
+  if (configured) return configured;
+  const locators = [
+    '/run/current-system/sw/bin/graft-claude-dir',
+    '/nix/var/nix/profiles/system/sw/bin/graft-claude-dir',
+  ];
+  for (const locator of locators) {
+    try {
+      const dir = execFileSync(locator, [], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+      if (dir) return dir;
+    } catch { /* try the next platform profile */ }
+  }
+  return null;
 }
 
 // The version of the package a dist/claude dir belongs to, or null if unreadable.
